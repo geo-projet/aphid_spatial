@@ -106,10 +106,15 @@ dependencies = [
     "scikit-gstat>=1.0",     # variogrammes empiriques
     "pykrige>=1.7",          # krigeage ordinaire/universel/indicateur
 
-    # Statistiques spatiales (ajoutées round 3)
+    # Statistiques spatiales
     "libpysal>=4.10",        # poids spatiaux (KNN, distance, gaussien)
     "esda>=2.5",             # Moran, Geary, Getis-Ord, LISA
     "pointpats>=2.4",        # processus ponctuels (Ripley K/L/g)
+    "spreg>=1.4",            # SAR fréquentiste (GM_Lag)
+
+    # Bayésien
+    "pymc>=5.10",            # GLMM, CAR, BYM
+    "arviz>=0.17",           # diagnostic MCMC
 
     # ML (GP via sklearn ; RF via sklearn ; métriques)
     "scikit-learn>=1.4",
@@ -125,10 +130,6 @@ dev = ["pytest", "pytest-cov", "ruff", "mypy", "jupyter", "ipykernel"]
 
 ### Dépendances reportées (rounds ultérieurs)
 
-* `pymc>=5.10` + `arviz>=0.17` — pour §7.6 (GLMM bayésien) et §7.5
-  variantes CAR/BYM. Lourdes à installer ; à activer quand on aborde le
-  bayésien.
-* `spreg>=1.4` — pour la version fréquentiste de SAR (§7.5).
 * `gpy>=1.13` — alternative GP pour noyaux composites / vraisemblance
   Binomial (à activer si la flexibilité de `sklearn.gaussian_process` est
   insuffisante).
@@ -136,6 +137,8 @@ dev = ["pytest", "pytest-cov", "ruff", "mypy", "jupyter", "ipykernel"]
   produira des sorties géoréférencées pour le SIG).
 * `numba>=0.59` — pour la V2 optimisée du MRF Ising (V1 NumPy actuelle
   suffit pour 100k cellules en ~7 s).
+* `rpy2` + `R-INLA` — pour valider les résultats PyMC contre INLA-SPDE
+  (« gold standard » bayésien spatial).
 
 ### Note sur INLA
 
@@ -359,12 +362,20 @@ Sortie : carte 2D de probabilité + carte 2D de variance/écart-type.
 
 C'est l'« approche contextuelle markovienne » mentionnée dans la thèse.
 
-- **Construction du graphe** : grille (rook = 4-voisins, queen = 8-voisins), ou
-  KNN sur le pas spatial.
-- **CAR (Conditional Autoregressive)** : implémenter via PyMC (`pm.CAR` n'existe
-  pas natif → coder via prior gaussien à précision creuse). Variante Besag,
-  Besag-York-Mollié (BYM).
-- **SAR (Simultaneous Autoregressive)** : via `spreg` pour la version fréquentiste.
+- **Construction du graphe** : grille (rook = 4-voisins, queen = 8-voisins) pour
+  l'Ising sur la grille complète ; KNN (par défaut k=4) sur les capteurs pour
+  CAR/BYM/SAR.
+- **`CARModel`** ✅ : Conditional Autoregressive (Besag) via PyMC (la classe
+  `pm.CAR` est désormais disponible nativement). Latent ``W ~ CAR(0, W_adj,
+  α, τ)`` aux capteurs, vraisemblance Binomial, prédiction sur grille par
+  IDW des effets latents postérieurs.
+- **`BYMModel`** ✅ : Besag-York-Mollié = CAR structuré + composante iid
+  ``W_iid ~ Normal(0, σ_iid)`` ; permet de séparer la variance spatialement
+  corrélée vs purement individuelle.
+- **`SARLagModel`** ✅ : SAR Lag fréquentiste via ``spreg.GM_Lag``. Modèle
+  ``y = ρ W y + Xβ + ε``. Pour la prédiction sur la grille, on combine
+  ``β₀ + β₁·d_bord(query)`` avec une propagation IDW des observations
+  capteur pondérée par ``ρ``.
 - **Modèle d'Ising binaire** : le champ latent `y_i ∈ {0, 1}` reste binaire
   (présence/absence par plant) ; les observations probabilistes des capteurs
   sont gérées par un modèle de mesure Binomial.
@@ -390,21 +401,32 @@ C'est l'« approche contextuelle markovienne » mentionnée dans la thèse.
 Cette section est la plus volumineuse à coder. Prévoir des tests sur petite grille
 (20×20) avec paramètres connus pour valider la convergence.
 
-### 7.6 Modèles bayésiens hiérarchiques (`hierarchical.py`)
+### 7.6 Modèles bayésiens hiérarchiques (`hierarchical.py`) ✅
 
-- **GLMM Binomial avec effet aléatoire spatial Matérn** via PyMC :
+- **`MaternGLMM`** : GLMM Binomial avec effet aléatoire spatial Matérn via
+  PyMC. Modèle :
   ```
   logit(p_i) = β0 + β1 * d_bord_i + W_i
-  W ~ MvNormal(0, K_Matern)
+  W ~ MvNormal(0, σ² · K_Matern(ℓ))
   k_i ~ Binomial(K, p_i)         # k_i = K * obs_i, K = n_observations
   ```
-  Si `n_observations is None` (capteur idéal), utiliser une vraisemblance
-  Beta ou Normale tronquée sur `obs_i` directement.
-- Inférence par NUTS sur les capteurs ; prédiction par krigeage gaussien postérieur
-  sur la grille complète.
-- Diagnostic via ArviZ (R-hat, ESS, trace plots).
-- **Variante SPDE-like** : approximation par éléments finis si la grille fine
-  rend le full Matérn trop coûteux. Optionnel, documenter.
+- Hyperpriors : `length_scale ~ HalfNormal(20)`, `sigma_W ~ HalfNormal(1.5)`,
+  `β₀ ~ N(logit(prev_emp), 2)`, `β₁ ~ N(0, 1)`.
+- **Inférence** : NUTS sur les capteurs uniquement (~20 sites — évite de
+  déclarer 100 k effets latents) ; pour la prédiction sur la grille
+  complète, on applique le **krigeage postérieur conditionnel** (espérance
+  conditionnelle Gaussienne) à chaque tirage de la chaîne, puis on moyenne
+  les sigmoïdes pour la carte prédite. La variance entre tirages fournit
+  l'incertitude.
+- **Diagnostic** via ArviZ : `R-hat`, ESS, trace plots accessibles via la
+  propriété `MaternGLMM.trace`.
+- **Variante SPDE-like** : approximation par éléments finis si la grille
+  fine rend le full Matérn trop coûteux. Reportée à un round ultérieur si
+  nécessaire.
+
+Performance : ~75 s sur le scénario par défaut (NUTS 200+200, 2 chaînes)
+et ~15 s pour la prédiction sur 100 k cellules avec 50 échantillons
+postérieurs.
 
 ### 7.7 Processus gaussien (`gp.py`)
 
@@ -569,14 +591,21 @@ croissant de complexité d'implémentation :
 8. ✅ **Random Forest** géo-aware.
 9. ✅ **MRF / Ising V1 NumPy** — pseudo-vraisemblance + Gibbs damier
    conditionné (V2 Numba à prévoir si besoin).
-10. ⏳ **GLMM bayésien** — prévoir long temps de calcul (PyMC).
-11. ⏳ **CAR/SAR/BYM** — variantes lattice.
+10. ✅ **GLMM bayésien** — `MaternGLMM` (PyMC NUTS aux capteurs +
+    krigeage postérieur conditionnel sur la grille).
+11. ✅ **CAR/SAR/BYM** — `CARModel` (Besag), `BYMModel` (Besag-York-Mollié)
+    via PyMC ; `SARLagModel` fréquentiste via spreg.GM_Lag.
 12. ✅ **SADIE** — version simplifiée (concentration + IDW + permutations).
-13. ✅ **Comparaison globale** — `07_comparison.ipynb` orchestre les 9
+13. ✅ **Comparaison globale** — `07_comparison.ipynb` orchestre les 13
     méthodes implémentées sur 5 schémas de placement, sauve
     `outputs/results/07_comparison.csv` + heatmap + boxplot.
 
 Légende : ✅ implémenté · ⏳ à faire dans un round ultérieur.
+
+**Toutes les méthodes du CLAUDE.md §12 sont implémentées.** Améliorations
+possibles dans des rounds futurs : V2 Ising avec Numba, formulation
+géostatistique de CAR/BYM extensible à 100 k cellules, SAR error model en
+plus du SAR lag, INLA-SPDE via `rpy2` pour validation gold standard.
 
 ## 13. Livrables attendus
 
@@ -615,6 +644,24 @@ Légende : ✅ implémenté · ⏳ à faire dans un round ultérieur.
   variabilité spatiale ; trop grand → information saturée et coûteuse à obtenir
   en pratique. Faire varier K dans `{10, 30, 50, 100, 1000}` pour quantifier le
   compromis information/coût.
+- **PyTensor sans BLAS** : sur Windows avec installation pip, PyTensor émet
+  une UserWarning « PyTensor could not link to a BLAS installation ». Les
+  performances NUTS s'en trouvent dégradées (~2× plus lent). Pour la prod,
+  installer PyMC via conda-forge ou pixi qui apportent un BLAS configuré.
+- **Convergence NUTS sur peu de capteurs** : avec 20 obs, des avertissements
+  R-hat > 1.01 et ESS faible sont fréquents. Augmenter `n_tune` et
+  `n_draws`, lancer 4 chaînes au lieu de 2. Pour un diagnostic rigoureux,
+  utiliser `arviz.summary(trace)`.
+- **CAR/BYM hors graphe** : `pm.CAR` est défini sur un graphe d'adjacence
+  (capteurs ici), pas sur des coordonnées arbitraires. La prédiction sur
+  100k cellules utilise une approximation IDW des effets latents
+  postérieurs ; pour une prédiction « pure », il faudrait reformuler le
+  problème comme un GP avec covariance dérivée du graphe (hors V1).
+- **SAR Lag prédiction** : `spreg.GM_Lag` n'expose pas nativement de
+  prediction sur de nouvelles positions. La méthode utilisée
+  (`β₀ + β₁·d_bord(query) + ρ·IDW(y_sensors)`) est pragmatique mais pas
+  formellement issue du modèle SAR. Pour une prédiction stricte, fitter
+  un SAR error model et utiliser le krigeage des résidus.
 
 ## 15. Extensions possibles
 

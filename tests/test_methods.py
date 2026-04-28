@@ -28,8 +28,12 @@ from aphid_spatial.methods.geostatistics import (
     UniversalKrigingEdge,
 )
 from aphid_spatial.methods.gp import MaternGPClassifier, MaternGPRegressor
+from aphid_spatial.methods.hierarchical import MaternGLMM
 from aphid_spatial.methods.lattice import (
+    BYMModel,
+    CARModel,
     IsingMRF,
+    SARLagModel,
     estimate_params_pseudo_likelihood,
 )
 from aphid_spatial.methods.ml import SpatialRandomForest
@@ -477,3 +481,77 @@ def test_ising_fallback_few_sensors() -> None:
     method.fit(r, f)
     p = method.predict_proba(f.coords)
     assert np.allclose(p, p[0])  # constante
+
+
+# ---------------------------------------------------------------------------
+# Bayésien : MaternGLMM, CARModel, BYMModel, SARLagModel
+# ---------------------------------------------------------------------------
+#
+# Ces tests utilisent peu de draws/tune pour rester rapides ; la qualité
+# de l'inférence n'est pas auditée ici, on vérifie uniquement la
+# conformité à l'interface SpatialMethod et la robustesse du fallback.
+
+
+@pytest.mark.slow
+def test_matern_glmm_basic(mini_field: Field, mini_readings: SensorReadings) -> None:
+    method = MaternGLMM(
+        n_draws=50, n_tune=50, chains=1, n_predict_samples=20, seed=0,
+    )
+    method.fit(mini_readings, mini_field)
+    _check_method_basic(method, mini_field)
+    sigma = method.predict_uncertainty(mini_field.coords)
+    assert sigma is not None
+    assert sigma.shape == (mini_field.coords.shape[0],)
+
+
+def test_matern_glmm_fallback_few_sensors() -> None:
+    f = simulate_field(FieldConfig(n_rows=10, n_cols=20, seed=0))
+    r = place_sensors(f, SensorConfig(n_sensors=3, seed=0))
+    m = MaternGLMM(n_draws=10, n_tune=10, chains=1, seed=0)
+    m.fit(r, f)
+    p = m.predict_proba(f.coords)
+    assert np.allclose(p, p[0])
+    assert m.predict_uncertainty(f.coords) is None
+
+
+@pytest.mark.slow
+def test_car_model_basic(mini_field: Field, mini_readings: SensorReadings) -> None:
+    method = CARModel(
+        n_neighbors=3, n_draws=50, n_tune=50, chains=1, n_predict_samples=20, seed=0,
+    )
+    method.fit(mini_readings, mini_field)
+    _check_method_basic(method, mini_field)
+    sigma = method.predict_uncertainty(mini_field.coords)
+    assert sigma is not None
+    assert sigma.shape == (mini_field.coords.shape[0],)
+
+
+@pytest.mark.slow
+def test_bym_model_basic(mini_field: Field, mini_readings: SensorReadings) -> None:
+    method = BYMModel(
+        n_neighbors=3, n_draws=50, n_tune=50, chains=1, n_predict_samples=20, seed=0,
+    )
+    method.fit(mini_readings, mini_field)
+    _check_method_basic(method, mini_field)
+    assert method.name == "bym_pymc"
+
+
+def test_sar_lag_basic(mini_field: Field, mini_readings: SensorReadings) -> None:
+    method = SARLagModel(n_neighbors=3)
+    method.fit(mini_readings, mini_field)
+    _check_method_basic(method, mini_field)
+    p = method.params
+    for key in ("rho", "beta0", "beta1"):
+        assert key in p
+    # SAR ne fournit pas d'incertitude analytique
+    assert method.predict_uncertainty(mini_field.coords) is None
+
+
+def test_sar_lag_fallback_few_sensors() -> None:
+    f = simulate_field(FieldConfig(n_rows=10, n_cols=20, seed=0))
+    r = place_sensors(f, SensorConfig(n_sensors=4, seed=0))
+    m = SARLagModel(n_neighbors=2)
+    m.fit(r, f)
+    # Soit le fit a réussi (alors p ∈ [0,1]) soit fallback constante
+    p = m.predict_proba(f.coords)
+    assert (p >= 0).all() and (p <= 1).all()

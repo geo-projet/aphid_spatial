@@ -20,13 +20,15 @@ Voir `CLAUDE.md` pour la spécification détaillée.
 
 ## État actuel
 
+**Toutes les méthodes du CLAUDE.md §12 sont implémentées.**
+
 Phases couvertes :
 
 - **Phase 1** : simulation du champ (effet de bordure + GRF Matérn + foyers).
 - **Phase 2** : 5 schémas de placement des capteurs (modèle d'observation
   probabiliste binomial).
 - **Évaluation** : AUC ROC/PR, Brier, log-loss, MAE/RMSE, calibration.
-- **Méthodes prédictives implémentées** :
+- **Méthodes prédictives implémentées (13)** :
   - `BaselineConstant` — borne inférieure (prévalence empirique).
   - `OrdinaryKrigingIndicator` — krigeage ordinaire (référence).
   - `UniversalKrigingEdge` — krigeage universel avec dérive distance-au-bord.
@@ -36,6 +38,12 @@ Phases couvertes :
   - `SADIE` — indices d'agrégation (Perry 1995, version simplifiée) +
     interpolation IDW.
   - `IsingMRF` — Markov Random Field V1 NumPy (Gibbs damier conditionné).
+  - `MaternGLMM` — GLMM bayésien Binomial avec effet aléatoire spatial
+    Matérn (PyMC NUTS + krigeage postérieur).
+  - `CARModel` (Besag) / `BYMModel` (Besag-York-Mollié) — Conditional
+    Autoregressive avec composante optionnelle iid (PyMC `pm.CAR`).
+  - `SARLagModel` — Simultaneous Autoregressive Lag fréquentiste
+    (`spreg.GM_Lag`).
 - **Modules exploratoires** (statistiques, pas de prédiction directe) :
   - `methods.exploration` — distance au bord, helpers capteur proche,
     distances inter-capteurs.
@@ -44,12 +52,12 @@ Phases couvertes :
   - `methods.point_process` — Ripley K/L/g, enveloppe CSR Monte Carlo,
     KDE d'intensité (pointpats).
 - **Visualisation** : cartes 2D (vérité, prédiction, incertitude, erreur).
-- **Notebooks** : `01_simulation`, `02_exploration` (avec autocorr + Ripley),
-  `03_geostatistics`, `04_lattice_mrf`, `06_ml_methods`,
-  `07_comparison` (orchestrateur 9 méthodes × 5 schémas).
+- **Notebooks** : `01_simulation`, `02_exploration` (+ autocorr + Ripley),
+  `03_geostatistics`, `04_lattice_mrf`, `05_hierarchical_bayes`,
+  `06_ml_methods`, `07_comparison` (orchestrateur 13 méthodes × 5 schémas).
 
-Méthodes prévues pour les rounds suivants : GLMM bayésien (PyMC), CAR/BYM,
-SAR fréquentiste (spreg), V2 optimisée Numba du MRF.
+Améliorations possibles : V2 Ising Numba, formulation géostatistique
+extensible de CAR/BYM, SAR error model, validation INLA-SPDE via `rpy2`.
 
 ## Installation
 
@@ -76,6 +84,8 @@ from aphid_spatial.methods.geostatistics import (
 )
 from aphid_spatial.methods.gp import MaternGPRegressor
 from aphid_spatial.methods.ml import SpatialRandomForest
+from aphid_spatial.methods.hierarchical import MaternGLMM
+from aphid_spatial.methods.lattice import CARModel, SARLagModel
 from aphid_spatial.evaluation.metrics import evaluate_all
 
 field = simulate_field(FieldConfig(seed=42))
@@ -90,6 +100,9 @@ for method in [
     UniversalKrigingEdge(),       # avec dérive = distance au bord
     MaternGPRegressor(),
     SpatialRandomForest(),
+    SARLagModel(),
+    MaternGLMM(n_draws=200, n_tune=200),  # bayésien (lent)
+    CARModel(n_draws=200, n_tune=200),
 ]:
     method.fit(readings, field)
     p_pred = method.predict_proba(field.coords)
@@ -120,23 +133,30 @@ sur la probabilité vraie.
 ## Reproduire les résultats principaux
 
 ```bash
-pytest                                    # 79 tests, doivent tous passer
+pytest                                       # 86 tests (-m "not slow" pour skip PyMC)
 jupyter nbconvert --to notebook --execute --inplace notebooks/*.ipynb
 ```
 
 Les figures sont écrites dans `outputs/figures/` et les CSV de métriques
-dans `outputs/results/`.
+dans `outputs/results/`. Les notebooks `05_hierarchical_bayes.ipynb` et
+`07_comparison.ipynb` sont longs (~10 min et ~30 min respectivement à
+cause de PyMC NUTS).
 
 ## Résultats actuels
 
-Comparaison des 9 méthodes implémentées sur le scénario par défaut
+Comparaison des 13 méthodes implémentées sur le scénario par défaut
 (champ 100×1000, 20 capteurs uniformes, K = 50 mesures temporelles,
-seed 2024) — extrait de `outputs/results/07_comparison.csv` :
+seed 2024). Sources : `outputs/results/07_comparison.csv`,
+`outputs/results/05_hierarchical_metrics.csv`.
 
 | Méthode                       | AUC ROC | AUC PR | Brier | RMSE p̂ | MAE p̂  |
 |-------------------------------|--------:|-------:|------:|--------:|-------:|
+| `sar_lag_spreg`               |   0.687 |  0.398 | 0.168 |   0.136 |  0.099 |
+| `bym_pymc`                    |   0.686 |  0.393 | 0.169 |   0.139 |  0.101 |
+| `car_pymc`                    |   0.683 |  0.396 | 0.169 |   0.141 |  0.104 |
 | `universal_kriging_edge`      |   0.681 |  0.383 | 0.169 |   0.140 |  0.101 |
 | `sadie_simplified`            |   0.680 |  0.397 | 0.169 |   0.139 |  0.104 |
+| `matern_glmm_pymc`            |   0.678 |  0.379 | 0.170 |   0.142 |  0.101 |
 | `ordinary_kriging_indicator`  |   0.672 |  0.379 | 0.170 |   0.142 |  0.105 |
 | `gp_matern_regressor`         |   0.658 |  0.363 | 0.172 |   0.150 |  0.112 |
 | `gp_matern_classifier`        |   0.636 |  0.355 | 0.178 |   0.169 |  0.127 |
@@ -145,15 +165,17 @@ seed 2024) — extrait de `outputs/results/07_comparison.csv` :
 | `ising_mrf_v1`                |   0.501 |  0.240 | 0.183 |   0.183 |  0.143 |
 | `baseline_constant`           |   0.500 |  0.239 | 0.182 |   0.181 |  0.141 |
 
-Le **krigeage universel avec dérive distance-au-bord** arrive en tête —
-l'effet de bordure documenté en littérature est bien capturé en
-l'incorporant comme covariable. L'**Ising MRF V1** est presque équivalent
-à la baseline constante : avec 20 capteurs sparses, la pseudo-vraisemblance
-estime ``β ≈ 0`` (manque d'identifiabilité). Une V2 EM + Numba est prévue.
+Les méthodes les mieux classées (SAR Lag, BYM, CAR, krigeage universel,
+SADIE, GLMM Matérn) se tiennent dans une fourchette d'AUC très resserrée
+(0.678–0.687). Toutes capturent l'autocorrélation spatiale + l'effet de
+bordure. L'**Ising V1** reste équivalent à la baseline (β ≈ 0 estimé par
+PL avec 20 capteurs).
 
-Voir `04_lattice_mrf.ipynb` pour la validation Ising sur petite grille,
-`06_ml_methods.ipynb` pour la comparaison ML, et `07_comparison.ipynb`
-pour la robustesse aux schémas de placement (heatmap + box-plots).
+Voir `04_lattice_mrf.ipynb` pour le diagnostic Ising,
+`05_hierarchical_bayes.ipynb` pour les diagnostics PyMC (R-hat, ESS,
+trace plots), `06_ml_methods.ipynb` pour la comparaison ML détaillée, et
+`07_comparison.ipynb` pour la robustesse aux schémas de placement
+(heatmap + box-plots).
 
 ## Tests
 

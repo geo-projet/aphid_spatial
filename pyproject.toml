@@ -28,6 +28,11 @@ dependencies = [
     "libpysal>=4.10",
     "esda>=2.5",
     "pointpats>=2.4",
+    "spreg>=1.4",            # SAR fréquentiste
+
+    # Bayésien
+    "pymc>=5.10",            # GLMM, MRF, hiérarchique
+    "arviz>=0.17",           # diagnostic MCMC
 
     # ML (utilisé pour GP, RF, métriques)
     "scikit-learn>=1.4",
@@ -86,3 +91,6 @@ check_untyped_defs = true
 testpaths = ["tests"]
 python_files = "test_*.py"
 addopts = "-ra --strict-markers"
+markers = [
+    "slow: tests qui prennent plus de 10 s (PyMC NUTS) ; skip via -m 'not slow'",
+]

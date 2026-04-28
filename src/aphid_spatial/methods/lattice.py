@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import time
+import warnings
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -338,9 +339,443 @@ class IsingMRF:
         }
 
 
+# ---------------------------------------------------------------------------
+# CAR / BYM (PyMC) et SAR (spreg) sur les capteurs
+# ---------------------------------------------------------------------------
+#
+# Ces modèles sont déclarés sur les capteurs uniquement (~20 nœuds), avec
+# une matrice d'adjacence KNN. Pour la prédiction sur la grille complète,
+# on utilise une **interpolation IDW** des effets latents postérieurs des
+# capteurs (approximation pragmatique : CAR/BYM ne sont pas définis hors
+# du graphe ; étendre à 100 k cellules nécessiterait une formulation
+# géostatistique séparée, ce qui sort du cadre V1).
+
+
+def _knn_adjacency(coords: NDArray[np.floating], k: int = 4) -> NDArray[np.float64]:
+    """Construit une matrice d'adjacence binaire symétrique KNN."""
+    n = coords.shape[0]
+    diff = coords[:, None, :] - coords[None, :, :]
+    d = np.sqrt((diff**2).sum(axis=-1))
+    np.fill_diagonal(d, np.inf)
+    nearest = np.argsort(d, axis=1)[:, :k]
+    W = np.zeros((n, n), dtype=np.float64)
+    for i in range(n):
+        for j in nearest[i]:
+            W[i, int(j)] = 1.0
+    # Symétriser : si i -> j alors j -> i
+    return np.asarray(np.maximum(W, W.T), dtype=np.float64)
+
+
+def _idw_interp(
+    query_coords: NDArray[np.floating],
+    sensor_coords: NDArray[np.floating],
+    sensor_values: NDArray[np.floating],
+    *,
+    power: float = 2.0,
+    eps: float = 1e-3,
+) -> NDArray[np.float64]:
+    """Interpolation inverse-distance (IDW) sur ``query_coords``."""
+    diff = query_coords[:, None, :] - sensor_coords[None, :, :]
+    d = np.sqrt((diff**2).sum(axis=-1))
+    weights = 1.0 / np.maximum(d, eps) ** power
+    norm = weights.sum(axis=1, keepdims=True)
+    return ((weights * sensor_values[None, :]).sum(axis=1) / norm.ravel()).astype(
+        np.float64
+    )
+
+
+def _bayesian_lattice_fit_predict(
+    readings: SensorReadings,
+    field_meta: Field,
+    model_kind: Literal["car", "bym"],
+    *,
+    n_neighbors: int,
+    n_draws: int,
+    n_tune: int,
+    chains: int,
+    target_accept: float,
+    seed: int,
+    n_predict_samples: int,
+) -> tuple[NDArray[np.float64] | None, dict[str, NDArray[np.floating]] | None]:
+    """Ajuste un modèle CAR ou BYM via PyMC, renvoie les échantillons utiles.
+
+    Retourne ``(None, None)`` en cas de fallback (peu de capteurs).
+    """
+    import warnings as _warnings
+
+    import pymc as pm  # import local pour éviter import inutile si non utilisé
+
+    n = readings.obs.size
+    if n < 4:
+        return None, None
+
+    cfg = readings.config
+    k_obs = cfg.n_observations if cfg.n_observations is not None else 100
+    counts = np.clip(np.round(readings.obs * k_obs), 0, k_obs).astype(np.int64)
+
+    coords = readings.coords.astype(np.float64)
+    W_adj = _knn_adjacency(coords, k=min(n_neighbors, n - 1))
+
+    # Distance au bord normalisée
+    cfg_field = field_meta.config
+    spacing = cfg_field.spacing_m
+    rows = np.arange(cfg_field.n_rows)
+    cols = np.arange(cfg_field.n_cols)
+    dy = np.minimum(rows, cfg_field.n_rows - 1 - rows) * spacing
+    dx = np.minimum(cols, cfg_field.n_cols - 1 - cols) * spacing
+    d_full = np.minimum(dy[:, None], dx[None, :]).ravel()
+    d_sensors = d_full[readings.sensor_idx].astype(np.float64)
+    d_mean = float(d_sensors.mean())
+    d_std = float(d_sensors.std()) or 1.0
+    d_z = (d_sensors - d_mean) / d_std
+
+    prev_emp = float(readings.obs.mean())
+    beta0_mu = float(np.log(np.clip(prev_emp, 1e-3, 1 - 1e-3) /
+                            (1 - np.clip(prev_emp, 1e-3, 1 - 1e-3))))
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore")
+        with pm.Model() as model:
+            del model  # silence linter
+            tau_struct = pm.HalfNormal("tau_struct", sigma=2.0)
+            alpha_car = pm.Beta("alpha_car", 2.0, 2.0)
+            beta0 = pm.Normal("beta0", mu=beta0_mu, sigma=2.0)
+            beta1 = pm.Normal("beta1", mu=0.0, sigma=1.0)
+
+            W_struct = pm.CAR(
+                "W_struct",
+                mu=np.zeros(n),
+                W=W_adj,
+                alpha=alpha_car,
+                tau=tau_struct,
+                shape=n,
+            )
+
+            if model_kind == "bym":
+                sigma_iid = pm.HalfNormal("sigma_iid", sigma=1.0)
+                W_iid = pm.Normal("W_iid", mu=0.0, sigma=sigma_iid, shape=n)
+                w_total = W_struct + W_iid
+            else:
+                w_total = W_struct
+
+            logit_p = beta0 + beta1 * d_z + w_total
+            pm.Binomial(
+                "obs_count",
+                n=k_obs,
+                p=pm.math.sigmoid(logit_p),
+                observed=counts,
+            )
+
+            trace = pm.sample(
+                draws=n_draws,
+                tune=n_tune,
+                chains=chains,
+                target_accept=target_accept,
+                random_seed=seed,
+                progressbar=False,
+                return_inferencedata=True,
+            )
+
+    post = trace.posterior
+    beta0_s = post["beta0"].values.flatten()
+    beta1_s = post["beta1"].values.flatten()
+    W_struct_s = post["W_struct"].values.reshape(-1, n)
+    if model_kind == "bym":
+        W_iid_s = post["W_iid"].values.reshape(-1, n)
+        W_tot_s = W_struct_s + W_iid_s
+    else:
+        W_tot_s = W_struct_s
+
+    rng = np.random.default_rng(seed)
+    n_total = beta0_s.size
+    idx = rng.choice(n_total, size=min(n_predict_samples, n_total), replace=False)
+    samples = {
+        "beta0": beta0_s[idx],
+        "beta1": beta1_s[idx],
+        "W_total": W_tot_s[idx],
+        "d_mean": np.array([d_mean]),
+        "d_std": np.array([d_std]),
+    }
+    return None, samples  # premier élément réservé pour usages futurs
+
+
+@dataclass
+class CARModel:
+    """Modèle CAR (Conditional Autoregressive, Besag) via PyMC.
+
+    Le champ latent ``W`` est défini sur les capteurs avec un voisinage KNN
+    et une distribution ``pm.CAR`` (précision creuse). Pour la prédiction
+    sur la grille, on interpole les ``W_sensors`` postérieurs par IDW.
+
+    Modèle :
+
+    .. code-block:: text
+
+        logit(p_i) = β₀ + β₁ · d_bord_i + W_i
+        W ~ CAR(mu=0, W=KNN(k), α, τ)
+        k_i ~ Binomial(K, p_i)
+
+    Parameters
+    ----------
+    n_neighbors : int
+        Nombre de voisins par capteur dans la matrice d'adjacence.
+    n_draws, n_tune, chains, target_accept, seed, n_predict_samples
+        Paramètres NUTS standards.
+    idw_power : float
+        Exposant IDW pour l'interpolation des effets latents sur la grille.
+    """
+
+    n_neighbors: int = 4
+    n_draws: int = 500
+    n_tune: int = 500
+    chains: int = 2
+    target_accept: float = 0.9
+    seed: int = 0
+    n_predict_samples: int = 100
+    idw_power: float = 2.0
+
+    name: str = field(default="car_pymc")
+
+    _readings: SensorReadings | None = field(default=None, init=False, repr=False)
+    _field: Field | None = field(default=None, init=False, repr=False)
+    _samples: dict[str, NDArray[np.floating]] | None = field(
+        default=None, init=False, repr=False
+    )
+    _fallback_value: float | None = field(default=None, init=False, repr=False)
+    _model_kind: str = field(default="car", init=False, repr=False)
+
+    def fit(self, readings: SensorReadings, field_meta: Field) -> None:
+        self._readings = readings
+        self._field = field_meta
+        if readings.obs.size < 4:
+            self._fallback_value = (
+                float(readings.obs.mean()) if readings.obs.size else 0.0
+            )
+            self._samples = None
+            return
+        _, samples = _bayesian_lattice_fit_predict(
+            readings, field_meta,
+            model_kind=self._model_kind,  # type: ignore[arg-type]
+            n_neighbors=self.n_neighbors,
+            n_draws=self.n_draws,
+            n_tune=self.n_tune,
+            chains=self.chains,
+            target_accept=self.target_accept,
+            seed=self.seed,
+            n_predict_samples=self.n_predict_samples,
+        )
+        self._samples = samples
+        self._fallback_value = None
+        if samples is not None:
+            logger.info(
+                "%s fit OK : kept=%d samples, mean(beta1)=%+.3f",
+                self._model_kind.upper(),
+                samples["beta0"].size,
+                float(samples["beta1"].mean()),
+            )
+
+    def _predict_per_sample(
+        self, query_coords: NDArray[np.floating]
+    ) -> NDArray[np.float64]:
+        assert self._samples is not None and self._readings is not None
+        assert self._field is not None
+        s = self._samples
+        # d_z aux query
+        cfg = self._field.config
+        x_max = (cfg.n_cols - 1) * cfg.spacing_m
+        y_max = (cfg.n_rows - 1) * cfg.spacing_m
+        dx = np.minimum(query_coords[:, 0], x_max - query_coords[:, 0])
+        dy = np.minimum(query_coords[:, 1], y_max - query_coords[:, 1])
+        d_q = np.minimum(dx, dy)
+        d_z_q = (d_q - float(s["d_mean"][0])) / float(s["d_std"][0])
+
+        m = s["beta0"].size
+        out = np.empty((m, query_coords.shape[0]), dtype=np.float64)
+        for i in range(m):
+            w_grid = _idw_interp(
+                query_coords.astype(np.float64),
+                self._readings.coords.astype(np.float64),
+                s["W_total"][i],
+                power=self.idw_power,
+            )
+            from scipy.special import expit as _expit
+            out[i] = _expit(s["beta0"][i] + s["beta1"][i] * d_z_q + w_grid)
+        return out
+
+    def predict_proba(self, query_coords: NDArray[np.floating]) -> NDArray[np.float64]:
+        if self._samples is None:
+            assert self._fallback_value is not None
+            return np.full(
+                query_coords.shape[0], self._fallback_value, dtype=np.float64
+            )
+        per = self._predict_per_sample(query_coords)
+        return np.clip(per.mean(axis=0), 0.0, 1.0).astype(np.float64)
+
+    def predict_uncertainty(
+        self, query_coords: NDArray[np.floating]
+    ) -> NDArray[np.float64] | None:
+        if self._samples is None:
+            return None
+        per = self._predict_per_sample(query_coords)
+        return per.std(axis=0).astype(np.float64)
+
+
+@dataclass
+class BYMModel(CARModel):
+    """Besag-York-Mollié : CAR structuré + composante iid Normal(0, σ_iid)."""
+
+    name: str = field(default="bym_pymc")
+    _model_kind: str = field(default="bym", init=False, repr=False)
+
+
+# ---------------------------------------------------------------------------
+# SAR fréquentiste via spreg
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SARLagModel:
+    """SAR Lag model (spreg.GM_Lag) sur les observations probabilistes.
+
+    Modèle :
+
+    .. code-block:: text
+
+        y = ρ · W · y + X β + ε
+
+    Inférence fréquentiste par moments généralisés (``GM_Lag``) sur les
+    capteurs. Pour la prédiction sur la grille, on utilise la décomposition
+    spatiale ``y_grid ≈ X_grid β + (matrice de propagation IDW depuis les
+    résidus capteurs)`` qui est une approximation pragmatique vu que SAR
+    n'est pas formulé pour des positions quelconques.
+
+    Parameters
+    ----------
+    n_neighbors : int
+        Voisinage KNN pour construire la matrice de poids.
+    idw_power : float
+        Exposant IDW pour la propagation aux query coords.
+    """
+
+    n_neighbors: int = 4
+    idw_power: float = 2.0
+
+    name: str = field(default="sar_lag_spreg")
+    _readings: SensorReadings | None = field(default=None, init=False, repr=False)
+    _field: Field | None = field(default=None, init=False, repr=False)
+    _betas: NDArray[np.float64] | None = field(default=None, init=False, repr=False)
+    _rho: float = field(default=0.0, init=False, repr=False)
+    _residuals: NDArray[np.float64] | None = field(
+        default=None, init=False, repr=False
+    )
+    _d_mean: float = field(default=0.0, init=False, repr=False)
+    _d_std: float = field(default=1.0, init=False, repr=False)
+    _fallback_value: float | None = field(default=None, init=False, repr=False)
+
+    def fit(self, readings: SensorReadings, field_meta: Field) -> None:
+        from libpysal.weights import KNN as _KNN
+        from spreg import GM_Lag
+
+        self._readings = readings
+        self._field = field_meta
+        n = readings.obs.size
+        if n < 5 or float(readings.obs.var()) == 0.0:
+            self._fallback_value = float(readings.obs.mean()) if n else 0.0
+            self._betas = None
+            return
+
+        # Distance au bord aux capteurs (+ z-score)
+        cfg = field_meta.config
+        spacing = cfg.spacing_m
+        rows = np.arange(cfg.n_rows)
+        cols = np.arange(cfg.n_cols)
+        dy = np.minimum(rows, cfg.n_rows - 1 - rows) * spacing
+        dx = np.minimum(cols, cfg.n_cols - 1 - cols) * spacing
+        d_full = np.minimum(dy[:, None], dx[None, :]).ravel()
+        d_sensors = d_full[readings.sensor_idx].astype(np.float64)
+        self._d_mean = float(d_sensors.mean())
+        self._d_std = float(d_sensors.std()) or 1.0
+        d_z = (d_sensors - self._d_mean) / self._d_std
+
+        y = readings.obs.astype(np.float64).reshape(-1, 1)
+        X = d_z.reshape(-1, 1)
+        w = _KNN.from_array(readings.coords, k=min(self.n_neighbors, n - 1))
+        w.transform = "r"
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                model = GM_Lag(y, X, w=w)
+        except Exception as exc:  # pragma: no cover
+            self._fallback_value = float(y.mean())
+            self._betas = None
+            logger.warning("SAR fit a échoué (%s) -> baseline", exc)
+            return
+
+        # GM_Lag.betas inclut [intercept, X β, ρ]
+        self._betas = np.asarray(model.betas, dtype=np.float64).ravel()
+        self._rho = float(self._betas[-1])
+        self._residuals = np.asarray(model.u, dtype=np.float64).ravel()
+        self._fallback_value = None
+        logger.info(
+            "SAR Lag fit OK : intercept=%.3f, beta1=%.3f, rho=%.3f",
+            float(self._betas[0]),
+            float(self._betas[1]),
+            self._rho,
+        )
+
+    def predict_proba(self, query_coords: NDArray[np.floating]) -> NDArray[np.float64]:
+        if self._betas is None:
+            assert self._fallback_value is not None
+            return np.full(
+                query_coords.shape[0], self._fallback_value, dtype=np.float64
+            )
+        assert self._readings is not None and self._field is not None
+        # Composante linéaire : β₀ + β₁ * d_z(query)
+        cfg = self._field.config
+        x_max = (cfg.n_cols - 1) * cfg.spacing_m
+        y_max = (cfg.n_rows - 1) * cfg.spacing_m
+        dx = np.minimum(query_coords[:, 0], x_max - query_coords[:, 0])
+        dy = np.minimum(query_coords[:, 1], y_max - query_coords[:, 1])
+        d_q = np.minimum(dx, dy)
+        d_z = (d_q - self._d_mean) / self._d_std
+        linear = self._betas[0] + self._betas[1] * d_z
+
+        # Propagation spatiale : ρ · IDW(y_sensors)
+        y_sens = self._readings.obs.astype(np.float64)
+        spatial = self._rho * _idw_interp(
+            query_coords.astype(np.float64),
+            self._readings.coords.astype(np.float64),
+            y_sens,
+            power=self.idw_power,
+        )
+        out = linear + spatial
+        return np.clip(out, 0.0, 1.0).astype(np.float64)
+
+    def predict_uncertainty(
+        self, query_coords: NDArray[np.floating]
+    ) -> NDArray[np.float64] | None:
+        # Pas d'incertitude analytique simple ; on ne renvoie rien.
+        del query_coords
+        return None
+
+    @property
+    def params(self) -> dict[str, float]:
+        if self._betas is None:
+            return {"rho": float("nan"), "beta0": float("nan"), "beta1": float("nan")}
+        return {
+            "rho": float(self._rho),
+            "beta0": float(self._betas[0]),
+            "beta1": float(self._betas[1]),
+        }
+
+
 __all__ = [
+    "BYMModel",
+    "CARModel",
     "IsingMRF",
     "Neighborhood",
+    "SARLagModel",
     "checkerboard_mask",
     "estimate_params_pseudo_likelihood",
     "gibbs_one_color",
