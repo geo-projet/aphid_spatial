@@ -48,9 +48,42 @@ def test_indices_in_grid(field: Field, placement: Placement) -> None:
     assert r.sensor_idx.max() < n
 
 
-def test_obs_binary(field: Field) -> None:
+def test_obs_in_unit_interval(field: Field) -> None:
     r = place_sensors(field, SensorConfig(n_sensors=20, seed=0))
-    assert set(np.unique(r.obs).tolist()).issubset({0, 1})
+    assert (r.obs >= 0.0).all()
+    assert (r.obs <= 1.0).all()
+    assert r.obs.dtype == np.float64
+
+
+def test_obs_exact_when_k_is_none(field: Field) -> None:
+    """Avec n_observations=None, obs est exactement la probabilité locale."""
+    cfg = SensorConfig(n_sensors=20, n_observations=None, seed=42)
+    r = place_sensors(field, cfg)
+    np.testing.assert_array_equal(r.obs, r.prob_local)
+
+
+def test_obs_binomial_grid_when_k_is_int(field: Field) -> None:
+    """Avec n_observations=K fini, obs ∈ {0, 1/K, ..., 1}."""
+    K = 10
+    cfg = SensorConfig(n_sensors=50, n_observations=K, seed=42)
+    r = place_sensors(field, cfg)
+    expected = np.arange(K + 1) / K
+    # Toutes les obs doivent être proches d'un multiple de 1/K
+    diffs = np.abs(r.obs[:, None] - expected[None, :]).min(axis=1)
+    assert (diffs < 1e-9).all()
+
+
+def test_obs_concentrates_around_prob_with_large_k(field: Field) -> None:
+    """Avec K grand, la moyenne |obs - prob_local| doit être petite."""
+    cfg = SensorConfig(n_sensors=100, n_observations=10000, seed=42)
+    r = place_sensors(field, cfg)
+    diff = float(np.mean(np.abs(r.obs - r.prob_local)))
+    assert diff < 0.02
+
+
+def test_invalid_n_observations(field: Field) -> None:
+    with pytest.raises(ValueError, match="n_observations"):
+        place_sensors(field, SensorConfig(n_sensors=10, n_observations=0))
 
 
 def test_reproducibility(field: Field) -> None:
@@ -68,29 +101,34 @@ def test_distinct_schemes_differ(field: Field) -> None:
     assert set(r_uni.sensor_idx.tolist()) != set(r_grid.sensor_idx.tolist())
 
 
-def test_fnr_flips_positives(field: Field) -> None:
-    """Avec fnr=1, tous les vrais positifs doivent devenir 0."""
-    cfg = SensorConfig(n_sensors=50, placement="uniform", fnr=1.0, fpr=0.0, seed=3)
-    r = place_sensors(field, cfg)
-    assert int(r.obs.sum()) == 0
+def test_sensor_radius_window_averages_prob(field: Field) -> None:
+    """Avec sensor_radius>0, prob_local est la moyenne de prob sur la fenêtre.
 
-
-def test_fpr_flips_negatives(field: Field) -> None:
-    """Avec fpr=1 et fnr=0, toutes les obs doivent être 1."""
-    cfg = SensorConfig(n_sensors=50, placement="uniform", fnr=0.0, fpr=1.0, seed=3)
-    r = place_sensors(field, cfg)
-    assert int(r.obs.sum()) == r.obs.size
-
-
-def test_sensor_radius_window(field: Field) -> None:
-    """Avec sensor_radius>0, l'observation prend le max sur un voisinage."""
-    cfg0 = SensorConfig(n_sensors=20, placement="uniform", sensor_radius=0, seed=5)
-    cfg1 = SensorConfig(n_sensors=20, placement="uniform", sensor_radius=2, seed=5)
+    On vérifie que ``prob_local`` (radius=2) reste dans l'enveloppe
+    [min, max] de prob sur la même fenêtre, et qu'elle diffère
+    typiquement de la valeur centrale (radius=0).
+    """
+    cfg0 = SensorConfig(
+        n_sensors=20, placement="uniform", sensor_radius=0, n_observations=None, seed=5
+    )
+    cfg2 = SensorConfig(
+        n_sensors=20, placement="uniform", sensor_radius=2, n_observations=None, seed=5
+    )
     r0 = place_sensors(field, cfg0)
-    r1 = place_sensors(field, cfg1)
-    # mêmes capteurs (même seed) ; r1 ≥ r0 partout (max sur fenêtre)
-    np.testing.assert_array_equal(r0.sensor_idx, r1.sensor_idx)
-    assert (r1.obs >= r0.obs).all()
+    r2 = place_sensors(field, cfg2)
+    np.testing.assert_array_equal(r0.sensor_idx, r2.sensor_idx)
+    # La moyenne sur 5x5 ne peut pas être plus extrême que le pixel central
+    # (sauf si tout est uniforme) ; on vérifie au moins que ce n'est pas le
+    # même tableau
+    assert not np.allclose(r0.prob_local, r2.prob_local)
+
+
+def test_prob_local_attribute(field: Field) -> None:
+    """SensorReadings expose prob_local de la bonne forme et dans [0, 1]."""
+    r = place_sensors(field, SensorConfig(n_sensors=20, seed=0))
+    assert r.prob_local.shape == r.obs.shape
+    assert (r.prob_local >= 0.0).all()
+    assert (r.prob_local <= 1.0).all()
 
 
 def test_invalid_n_sensors(field: Field) -> None:

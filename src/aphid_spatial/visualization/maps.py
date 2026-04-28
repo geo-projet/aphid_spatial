@@ -79,38 +79,38 @@ def plot_sensors(
     show_field: bool = True,
     title: str | None = None,
 ) -> tuple[Figure, Axes]:
-    """Affiche les capteurs (cercles colorés selon ``obs``) ; optionnellement
-    superposés à la probabilité vraie en arrière-plan."""
+    """Affiche les capteurs (couleur selon ``obs ∈ [0, 1]``) ; optionnellement
+    superposés à la probabilité vraie en arrière-plan.
+
+    La taille du cercle croît linéairement avec ``obs`` pour rendre visibles les
+    capteurs à forte présence même sur des fonds sombres.
+    """
     fig, ax = _ensure_ax(ax, figsize)
     if show_field:
         plot_field(field, "prob", ax=ax, title="")
-    pos = readings.obs == 1
-    ax.scatter(
-        readings.coords[~pos, 0],
-        readings.coords[~pos, 1],
-        marker="o",
-        s=40,
-        facecolors="white",
+    sizes = 30.0 + 90.0 * np.clip(readings.obs, 0.0, 1.0)
+    sc = ax.scatter(
+        readings.coords[:, 0],
+        readings.coords[:, 1],
+        c=readings.obs,
+        cmap="coolwarm",
+        vmin=0.0,
+        vmax=1.0,
+        s=sizes,
         edgecolors="black",
         linewidths=1.0,
-        label=f"obs=0 (n={int((~pos).sum())})",
-        zorder=3,
-    )
-    ax.scatter(
-        readings.coords[pos, 0],
-        readings.coords[pos, 1],
-        marker="o",
-        s=60,
-        facecolors="red",
-        edgecolors="black",
-        linewidths=1.2,
-        label=f"obs=1 (n={int(pos.sum())})",
         zorder=4,
     )
     ax.set_xlabel("x (m)")
     ax.set_ylabel("y (m)")
-    ax.set_title(title or f"Capteurs ({readings.config.placement})")
-    ax.legend(loc="upper right", fontsize=8, framealpha=0.85)
+    n_pos = int((readings.obs > 0.5).sum())
+    n_zero = int((readings.obs == 0.0).sum())
+    ax.set_title(
+        title
+        or f"Capteurs ({readings.config.placement}) — obs>0.5 : {n_pos}/{readings.obs.size}, obs=0 : {n_zero}"
+    )
+    if not show_field:
+        fig.colorbar(sc, ax=ax, fraction=0.025, pad=0.02, label="obs (fraction)")
     return fig, ax
 
 

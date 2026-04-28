@@ -54,7 +54,10 @@ from aphid_spatial.methods.geostatistics import OrdinaryKrigingIndicator
 from aphid_spatial.evaluation.metrics import evaluate_all
 
 field = simulate_field(FieldConfig(seed=42))
-readings = place_sensors(field, SensorConfig(n_sensors=20, placement="uniform"))
+# Chaque capteur effectue 50 mesures temporelles ; obs ∈ [0, 1] est k/50.
+readings = place_sensors(
+    field, SensorConfig(n_sensors=20, placement="uniform", n_observations=50)
+)
 
 method = OrdinaryKrigingIndicator()
 method.fit(readings, field)
@@ -62,6 +65,15 @@ p_pred = method.predict_proba(field.coords)
 
 print(evaluate_all(field.presence, p_pred, field.prob))
 ```
+
+### Modèle d'observation
+
+Chaque capteur retourne une **probabilité de présence** dans `[0, 1]`, pas
+une détection binaire. Concrètement, `n_observations` mesures Bernoulli
+indépendantes de la probabilité locale `prob_local` (moyenne de `prob` sur
+le voisinage `(2r+1)²`) sont effectuées, et l'observation est la fraction
+de positifs `k / n_observations`. Avec `n_observations=None`, le capteur
+retourne `prob_local` exact (cas idéal, sans bruit d'estimation).
 
 ## Tests
 

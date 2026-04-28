@@ -8,8 +8,12 @@ Cinq schémas sont supportés :
 * ``edge_biased`` — pondération par ``exp(-d_bord / λ)``
 * ``poisson_disk`` — *dart throwing* avec contrainte de distance minimale
 
-Le modèle d'observation produit une lecture binaire par capteur, éventuellement
-bruitée par un taux de faux négatifs (FNR) et de faux positifs (FPR).
+**Modèle d'observation** : chaque capteur observe la probabilité de présence
+sur son voisinage (moyenne de ``prob`` sur la fenêtre ``(2r+1)²``). On suppose
+que le capteur effectue ``n_observations`` mesures temporelles indépendantes
+chacune Bernoulli de ce ``prob_local`` ; il retourne la fraction de positifs
+``k / n_observations``. Avec ``n_observations=None``, le capteur retourne la
+probabilité exacte (limite ``K→∞``, utile comme baseline théorique).
 """
 
 from __future__ import annotations
@@ -39,13 +43,15 @@ class SensorConfig:
     placement : str
         Schéma de placement (voir module).
     sensor_radius : int
-        Rayon du voisinage observé (en cellules de la grille). 0 = un seul plant.
-    fnr : float
-        Taux de faux négatifs (probabilité qu'un vrai positif soit lu négatif).
-    fpr : float
-        Taux de faux positifs.
+        Rayon du voisinage observé (en cellules de la grille). 0 = un seul plant ;
+        > 0 = moyenne de ``prob`` sur la fenêtre ``(2r+1)²``.
+    n_observations : int | None
+        Nombre de mesures temporelles indépendantes par capteur. ``None`` =
+        capteur idéal (lecture exacte de ``prob``). Sinon l'observation est
+        ``Binomial(n_observations, prob_local) / n_observations`` et appartient
+        à ``{0, 1/K, 2/K, ..., 1}``.
     seed : int
-        Graine pour la reproductibilité.
+        Graine pour la reproductibilité (placement et bruit).
     edge_lambda_m : float
         Longueur caractéristique pour le schéma ``edge_biased``.
     """
@@ -53,8 +59,7 @@ class SensorConfig:
     n_sensors: int = 20
     placement: Placement = "uniform"
     sensor_radius: int = 0
-    fnr: float = 0.0
-    fpr: float = 0.0
+    n_observations: int | None = 50
     seed: int = 0
     edge_lambda_m: float = 20.0
 
@@ -69,15 +74,22 @@ class SensorReadings:
         Indices linéaires (row-major) des capteurs dans la grille du champ.
     coords : NDArray[np.float64]
         Coordonnées ``(n_sensors, 2)`` en mètres.
-    obs : NDArray[np.int8]
-        Observation binaire pour chaque capteur (0/1), éventuellement bruitée.
+    obs : NDArray[np.float64]
+        Probabilité de présence estimée par chaque capteur dans ``[0, 1]``.
+        Vaut exactement ``prob_local`` si ``config.n_observations is None``,
+        sinon ``Binomial(K, prob_local) / K``.
+    prob_local : NDArray[np.float64]
+        Probabilité réelle au voisinage du capteur (moyenne de ``prob`` sur
+        la fenêtre). Sert de référence pour les analyses ; les méthodes
+        d'estimation ne doivent pas l'utiliser directement.
     config : SensorConfig
         Configuration ayant produit ces observations.
     """
 
     sensor_idx: NDArray[np.int64]
     coords: NDArray[np.float64]
-    obs: NDArray[np.int8]
+    obs: NDArray[np.float64]
+    prob_local: NDArray[np.float64]
     config: SensorConfig
 
 
@@ -274,32 +286,45 @@ def _observe(
     sensor_idx: NDArray[np.int64],
     config: SensorConfig,
     rng: np.random.Generator,
-) -> NDArray[np.int8]:
-    """Renvoie l'observation binaire bruitée de chaque capteur."""
-    presence_grid = field.to_grid("presence")
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Calcule l'observation probabiliste et la probabilité réelle locale.
+
+    Returns
+    -------
+    obs : NDArray[np.float64]
+        Observation du capteur dans ``[0, 1]``. Lecture exacte si
+        ``config.n_observations is None``, sinon échantillon binomial.
+    prob_local : NDArray[np.float64]
+        Vraie probabilité moyennée sur le voisinage (sert de référence).
+    """
+    prob_grid = field.to_grid("prob")
     n_rows, n_cols = field.config.n_rows, field.config.n_cols
     rows, cols = np.divmod(sensor_idx, n_cols)
 
     if config.sensor_radius <= 0:
-        true_obs = presence_grid[rows, cols]
+        prob_local = prob_grid[rows, cols].astype(np.float64)
     else:
         r = config.sensor_radius
-        true_obs = np.empty(sensor_idx.shape, dtype=np.int8)
+        prob_local = np.empty(sensor_idx.shape, dtype=np.float64)
         for k, (rr, cc) in enumerate(zip(rows, cols, strict=True)):
             r0 = max(0, int(rr) - r)
             r1 = min(n_rows, int(rr) + r + 1)
             c0 = max(0, int(cc) - r)
             c1 = min(n_cols, int(cc) + r + 1)
-            true_obs[k] = int(presence_grid[r0:r1, c0:c1].max())
+            prob_local[k] = float(prob_grid[r0:r1, c0:c1].mean())
 
-    obs = true_obs.astype(np.int8)
-    if config.fnr > 0.0 or config.fpr > 0.0:
-        flip_pos = (obs == 1) & (rng.random(obs.shape) < config.fnr)
-        flip_neg = (obs == 0) & (rng.random(obs.shape) < config.fpr)
-        obs = obs.copy()
-        obs[flip_pos] = 0
-        obs[flip_neg] = 1
-    return obs
+    if config.n_observations is None:
+        obs = prob_local.copy()
+    else:
+        K = int(config.n_observations)
+        if K <= 0:
+            raise ValueError(
+                f"n_observations must be a positive int or None, got {K}"
+            )
+        # Binomial(K, prob_local) / K, vectorisé
+        counts = rng.binomial(K, np.clip(prob_local, 0.0, 1.0))
+        obs = counts.astype(np.float64) / float(K)
+    return obs, prob_local
 
 
 # ---------------------------------------------------------------------------
@@ -346,19 +371,21 @@ def place_sensors(field: Field, config: SensorConfig | None = None) -> SensorRea
         raise RuntimeError("Sensor placement produced duplicate indices")
 
     coords = field.coords[idx]
-    obs = _observe(field, idx, config, rng)
+    obs, prob_local = _observe(field, idx, config, rng)
 
     logger.info(
-        "place_sensors: %s, n=%d, prevalence_obs=%.3f",
+        "place_sensors: %s, n=%d, obs_mean=%.3f, prob_local_mean=%.3f",
         config.placement,
         config.n_sensors,
         float(obs.mean()),
+        float(prob_local.mean()),
     )
 
     return SensorReadings(
         sensor_idx=idx,
         coords=coords,
         obs=obs,
+        prob_local=prob_local,
         config=config,
     )
 
