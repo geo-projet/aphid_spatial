@@ -146,17 +146,16 @@ cause de PyMC NUTS).
 
 Comparaison des 13 méthodes implémentées sur le scénario par défaut
 (champ 100×1000, 20 capteurs uniformes, K = 50 mesures temporelles,
-seed 2024). Sources : `outputs/results/07_comparison.csv`,
-`outputs/results/05_hierarchical_metrics.csv`.
+seed 2024). Source : `outputs/results/07_comparison.csv`.
 
 | Méthode                       | AUC ROC | AUC PR | Brier | RMSE p̂ | MAE p̂  |
 |-------------------------------|--------:|-------:|------:|--------:|-------:|
-| `sar_lag_spreg`               |   0.687 |  0.398 | 0.168 |   0.136 |  0.099 |
-| `bym_pymc`                    |   0.686 |  0.393 | 0.169 |   0.139 |  0.101 |
-| `car_pymc`                    |   0.683 |  0.396 | 0.169 |   0.141 |  0.104 |
+| `sar_lag_spreg`               |   0.688 |  0.382 | 0.177 |   0.166 |  0.126 |
+| `bym_pymc`                    |   0.685 |  0.395 | 0.169 |   0.140 |  0.102 |
 | `universal_kriging_edge`      |   0.681 |  0.383 | 0.169 |   0.140 |  0.101 |
 | `sadie_simplified`            |   0.680 |  0.397 | 0.169 |   0.139 |  0.104 |
-| `matern_glmm_pymc`            |   0.678 |  0.379 | 0.170 |   0.142 |  0.101 |
+| `car_pymc`                    |   0.675 |  0.396 | 0.169 |   0.141 |  0.105 |
+| `matern_glmm_pymc`            |   0.675 |  0.372 | 0.170 |   0.144 |  0.102 |
 | `ordinary_kriging_indicator`  |   0.672 |  0.379 | 0.170 |   0.142 |  0.105 |
 | `gp_matern_regressor`         |   0.658 |  0.363 | 0.172 |   0.150 |  0.112 |
 | `gp_matern_classifier`        |   0.636 |  0.355 | 0.178 |   0.169 |  0.127 |
@@ -165,11 +164,12 @@ seed 2024). Sources : `outputs/results/07_comparison.csv`,
 | `ising_mrf_v1`                |   0.501 |  0.240 | 0.183 |   0.183 |  0.143 |
 | `baseline_constant`           |   0.500 |  0.239 | 0.182 |   0.181 |  0.141 |
 
-Les méthodes les mieux classées (SAR Lag, BYM, CAR, krigeage universel,
-SADIE, GLMM Matérn) se tiennent dans une fourchette d'AUC très resserrée
-(0.678–0.687). Toutes capturent l'autocorrélation spatiale + l'effet de
-bordure. L'**Ising V1** reste équivalent à la baseline (β ≈ 0 estimé par
-PL avec 20 capteurs).
+Les méthodes les mieux classées (SAR Lag, BYM, krigeage universel, SADIE,
+CAR, GLMM Matérn) se tiennent dans une fourchette d'AUC très resserrée
+(0.675–0.688). Toutes capturent l'autocorrélation spatiale + l'effet de
+bordure. SAR Lag est en tête sur l'AUC mais le krigeage universel reste
+meilleur sur RMSE/Brier (calibration plus fine). L'**Ising V1** reste
+équivalent à la baseline (β ≈ 0 estimé par PL avec 20 capteurs).
 
 Voir `04_lattice_mrf.ipynb` pour le diagnostic Ising,
 `05_hierarchical_bayes.ipynb` pour les diagnostics PyMC (R-hat, ESS,
