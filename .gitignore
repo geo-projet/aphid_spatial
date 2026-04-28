@@ -51,3 +51,6 @@ notebooks/.ipynb_checkpoints/
 *.log
 .env
 .envrc
+
+# Spécification interne (non publique)
+CLAUDE.md

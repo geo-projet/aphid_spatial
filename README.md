@@ -16,11 +16,11 @@ continue + tirage Bernoulli), on y place des capteurs, puis on applique
 différentes méthodes pour reconstruire la carte probabiliste à partir des
 observations partielles.
 
-Voir `CLAUDE.md` pour la spécification détaillée.
-
 ## État actuel
 
-**Toutes les méthodes du CLAUDE.md §12 sont implémentées.**
+**Toutes les méthodes ciblées (géostatistique, autocorrélation, processus
+ponctuels, GP, RF, MRF/Ising, GLMM bayésien, CAR/BYM, SAR) sont
+implémentées.**
 
 Phases couvertes :
 
@@ -191,4 +191,23 @@ jupyter notebook notebooks/
 
 ## Structure
 
-Voir `CLAUDE.md` section 3 pour l'arborescence complète.
+```
+aphid_spatial/
+├── pyproject.toml
+├── README.md
+├── src/aphid_spatial/
+│   ├── simulation/         # field.py, sensors.py
+│   ├── methods/            # exploration, autocorrelation, point_process,
+│   │                       # geostatistics, gp, ml, sadie,
+│   │                       # lattice (Ising/CAR/BYM/SAR), hierarchical (GLMM)
+│   ├── evaluation/         # metrics.py
+│   └── visualization/      # maps.py
+├── tests/
+├── notebooks/              # 01_simulation, 02_exploration, 03_geostatistics,
+│                           # 04_lattice_mrf, 05_hierarchical_bayes,
+│                           # 06_ml_methods, 07_comparison
+├── data/simulated/         # champs synthétiques (npz, gitignored)
+└── outputs/
+    ├── figures/            # PNG (gitignored)
+    └── results/            # CSV de métriques (gitignored)
+```
