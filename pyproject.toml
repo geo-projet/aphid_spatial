@@ -1,0 +1,82 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aphid_spatial"
+version = "0.1.0"
+description = "Modélisation de la corrélation spatiale du puceron de la laitue (Nasonovia ribisnigri)"
+authors = [
+    {name = "Emma Dubrûle"},
+]
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "pandas>=2.1",
+    "matplotlib>=3.8",
+    "seaborn>=0.13",
+
+    # Géostatistique
+    "gstools>=1.5",
+    "scikit-gstat>=1.0",
+    "pykrige>=1.7",
+
+    # ML (utilisé pour les métriques dans ce round)
+    "scikit-learn>=1.4",
+
+    # Utilitaires
+    "tqdm>=4.66",
+    "joblib>=1.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+    "mypy>=1.8",
+    "jupyter>=1.0",
+    "ipykernel>=6.29",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+ignore = [
+    "E501",   # line-too-long (laissé au formatter)
+    "N803",   # argument-name-lowercase (on utilise X, K, etc. pour la clarté mathématique)
+    "N806",   # variable-name-lowercase (idem)
+    "RUF001", # ambiguous-unicode-character-string (σ, μ, etc. utilisés en notation mathématique)
+    "RUF002", # ambiguous-unicode-character-docstring (×, σ, etc. en notation mathématique)
+    "RUF046", # unnecessary-int-on-cast (faux positifs sur np.sqrt/np.ceil)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+"notebooks/*" = ["E402", "F401"]
+
+[tool.mypy]
+python_version = "3.11"
+# Strict mode est trop lourd avec les stubs NumPy ; on garde les annotations
+# comme documentation et on active les vérifications utiles individuellement.
+ignore_missing_imports = true
+files = ["src"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+addopts = "-ra --strict-markers"

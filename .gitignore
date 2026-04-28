@@ -1,0 +1,53 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# Environnements virtuels
+.venv/
+venv/
+env/
+ENV/
+
+# Caches outils
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+
+# IDE / éditeurs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Données simulées et sorties (régénérables)
+data/simulated/*.npz
+outputs/figures/*
+outputs/results/*
+
+# Conserver les dossiers vides via .gitkeep
+!data/simulated/.gitkeep
+!outputs/figures/.gitkeep
+!outputs/results/.gitkeep
+
+# Notebooks : on garde le contenu mais pas les checkpoints
+notebooks/.ipynb_checkpoints/
+
+# Fichiers locaux
+*.log
+.env
+.envrc
