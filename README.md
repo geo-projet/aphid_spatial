@@ -4,14 +4,17 @@ Modélisation de la corrélation spatiale du puceron de la laitue
 (*Nasonovia ribisnigri*) — composante géospatiale de la thèse d'Emma Dubrûle
 (Université de Sherbrooke, Département de géomatique appliquée).
 
-À partir des observations de ~20 capteurs binaires fixes répartis sur un champ
-de laitue, on estime la probabilité de présence du puceron sur l'ensemble du
-champ (des milliers de plants) en exploitant la corrélation spatiale.
+À partir des observations de ~20 capteurs fixes répartis sur un champ de
+laitue — chaque capteur retournant une **probabilité de présence** dans
+`[0, 1]` (fraction d'observations positives sur une fenêtre temporelle) —
+on estime la probabilité de présence du puceron sur l'ensemble du champ
+(des milliers de plants) en exploitant la corrélation spatiale.
 
 Faute de données terrain, le module commence par une **simulation contrôlée** :
-on génère un champ synthétique avec une vérité terrain connue, on y place des
-capteurs, puis on applique différentes méthodes pour reconstruire la carte
-probabiliste à partir des observations partielles.
+on génère un champ synthétique avec une vérité terrain connue (probabilité
+continue + tirage Bernoulli), on y place des capteurs, puis on applique
+différentes méthodes pour reconstruire la carte probabiliste à partir des
+observations partielles.
 
 Voir `CLAUDE.md` pour la spécification détaillée.
 
@@ -74,6 +77,27 @@ indépendantes de la probabilité locale `prob_local` (moyenne de `prob` sur
 le voisinage `(2r+1)²`) sont effectuées, et l'observation est la fraction
 de positifs `k / n_observations`. Avec `n_observations=None`, le capteur
 retourne `prob_local` exact (cas idéal, sans bruit d'estimation).
+
+`SensorReadings` expose deux tableaux distincts :
+
+- `obs` (float64) — l'observation bruitée du capteur, dans `[0, 1]`. C'est
+  ce que les méthodes d'estimation utilisent pour l'inférence.
+- `prob_local` (float64) — la probabilité réelle locale (référence pour
+  analyse) ; ne pas l'utiliser comme entrée des méthodes d'estimation.
+
+`Field.presence` (binaire) reste disponible comme vérité terrain pour
+calculer AUC, log-loss, Brier ; `Field.prob` permet de calculer MAE/RMSE
+sur la probabilité vraie.
+
+## Reproduire les résultats principaux
+
+```bash
+pytest                                    # 49 tests, doivent tous passer
+jupyter nbconvert --to notebook --execute --inplace notebooks/*.ipynb
+```
+
+Les figures sont écrites dans `outputs/figures/` et un CSV de métriques
+dans `outputs/results/`.
 
 ## Tests
 

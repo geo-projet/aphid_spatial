@@ -8,9 +8,11 @@ de la laitue (*Nasonovia ribisnigri*) à l'aide d'IA en périphérie.
 
 Le présent module implémente la composante **modélisation géospatiale** du projet :
 on dispose de ~20 capteurs fixes (déplaçables manuellement) répartis sur un champ
-contenant des milliers de plants. À partir des détections binaires des capteurs, on
-veut estimer la probabilité de présence des pucerons sur l'ensemble du champ
-(cartographie probabiliste) en exploitant la corrélation spatiale.
+contenant des milliers de plants. Chaque capteur retourne une **probabilité de
+présence** dans `[0, 1]` (fraction d'observations positives sur une fenêtre
+temporelle), et l'on veut estimer la probabilité de présence des pucerons sur
+l'ensemble du champ (cartographie probabiliste) en exploitant la corrélation
+spatiale.
 
 Comme on ne dispose pas encore de données terrain, ce module commence par une
 **simulation contrôlée** : on génère un champ synthétique avec une vérité terrain
@@ -213,13 +215,21 @@ def simulate_field(config: FieldConfig) -> Field:
 
 ### 6.2 Modèle d'observation
 
-Chaque capteur en position `s_i` observe la présence sur **un voisinage** de
-rayon `r_capteur` (défaut 0 = uniquement le plant sous le capteur ; option 1 = plant
-+ 8 voisins immédiats pour simuler le champ de vue de la caméra). L'observation est
-binaire (au moins un puceron détecté ou non), avec une option pour ajouter du bruit
-de détection (taux de faux négatifs `fnr` et faux positifs `fpr` paramétrables, à
-mettre par défaut à 0 dans la première phase et activer pour les analyses de
-robustesse).
+Chaque capteur retourne une **probabilité de présence** dans `[0, 1]`, pas une
+détection binaire. Concrètement, le capteur en position `s_i` observe le plant
+sous lui (`sensor_radius = 0`) ou un voisinage `(2r+1) × (2r+1)`
+(`sensor_radius ≥ 1`, simule le champ de vue de la caméra) ; la probabilité
+locale `prob_local` est la **moyenne** de la probabilité vraie `prob` sur cette
+fenêtre. Le capteur effectue ensuite `n_observations` mesures temporelles
+indépendantes, chacune Bernoulli de `prob_local`, et retourne la fraction de
+positifs `k / n_observations`. Avec `n_observations = None`, le capteur lit
+`prob_local` exactement (limite `K → ∞`, baseline théorique sans bruit
+d'estimation).
+
+Justification : les capteurs ne fournissent pas une détection ponctuelle mais
+une mesure intégrée dans le temps (durée d'exposition à l'infestation). Cette
+information graduée est plus riche qu'un simple 0/1 pour les méthodes
+d'interpolation spatiale.
 
 ### 6.3 API
 
@@ -228,16 +238,19 @@ robustesse).
 class SensorConfig:
     n_sensors: int = 20
     placement: Literal["uniform", "grid", "stratified", "edge_biased", "poisson_disk"] = "uniform"
-    sensor_radius: int = 0       # 0 = un plant ; 1 = 3x3
-    fnr: float = 0.0
-    fpr: float = 0.0
+    sensor_radius: int = 0           # 0 = un plant ; 1 = 3x3 (moyenne de prob)
+    n_observations: int | None = 50  # K mesures temporelles ; None = exact
     seed: int = 0
+    edge_lambda_m: float = 20.0      # utilisé par placement="edge_biased"
 
 @dataclass
 class SensorReadings:
     sensor_idx: np.ndarray      # indices dans la grille
     coords: np.ndarray          # (n_sensors, 2)
-    obs: np.ndarray             # (n_sensors,), {0,1}
+    obs: np.ndarray             # (n_sensors,), float64 dans [0, 1]
+    prob_local: np.ndarray      # (n_sensors,), probabilité réelle locale
+                                # (référence pour analyse, à ne pas utiliser
+                                # par les méthodes d'estimation)
 
 def place_sensors(field: Field, config: SensorConfig) -> SensorReadings: ...
 ```
@@ -299,14 +312,16 @@ référence de tous les capteurs.
 
 Cœur des méthodes pour produire la carte probabiliste continue.
 
-- **Variogramme empirique indicateur** (variable = `obs ∈ {0,1}`) : avec
-  `scikit-gstat` ou `gstools`. Tracer + ajuster modèles sphérique / exponentiel /
-  gaussien / Matérn.
-- **Krigeage ordinaire** sur l'indicateur — donne une probabilité (avec clipping
-  [0,1]) et une variance de krigeage. `pykrige.OrdinaryKriging` ou
+- **Variogramme empirique** (variable = `obs ∈ [0, 1]`, observation
+  probabiliste du capteur) : avec `scikit-gstat` ou `gstools`. Tracer +
+  ajuster modèles sphérique / exponentiel / gaussien / Matérn. Le passage
+  au continu rend le variogramme plus stable qu'avec une variable binaire.
+- **Krigeage ordinaire** sur les observations probabilistes — donne une
+  probabilité (clipping `[0, 1]` en cas de léger débordement numérique) et
+  une variance de krigeage. `pykrige.OrdinaryKriging` ou
   `gstools.krige.Ordinary`.
-- **Krigeage indicateur** explicite (formellement plus correct que l'OK sur
-  binaire).
+- **Krigeage indicateur** : conserver pour comparaison historique en
+  binarisant les observations à un seuil (par ex. `obs > 0.5`).
 - **Krigeage universel** avec dérive = distance au bord (pour intégrer
   explicitement l'effet de bordure documenté en littérature).
 - **Co-krigeage** (optionnel) : si une covariable auxiliaire est disponible (par
@@ -324,14 +339,22 @@ C'est l'« approche contextuelle markovienne » mentionnée dans la thèse.
   pas natif → coder via prior gaussien à précision creuse). Variante Besag,
   Besag-York-Mollié (BYM).
 - **SAR (Simultaneous Autoregressive)** : via `spreg` pour la version fréquentiste.
-- **Modèle d'Ising binaire** :
-  - Énergie locale : `E(y) = -α Σ y_i - β Σ_{i~j} y_i y_j`.
-  - Estimation des paramètres `(α, β)` par **pseudo-vraisemblance** (Besag) sur
-    les capteurs, en traitant les voisins non observés comme manquants.
-  - **Inférence** : échantillonneur de Gibbs conditionné sur les capteurs observés
-    pour produire `P(y_s = 1 | obs)` en chaque cellule.
-  - Implémentation custom NumPy/Numba (la grille fait 100k cellules, attention à
-    la performance — utiliser des updates vectorisés en damier).
+- **Modèle d'Ising binaire** : le champ latent `y_i ∈ {0, 1}` reste binaire
+  (présence/absence par plant) ; les observations probabilistes des capteurs
+  sont gérées par un modèle de mesure Binomial.
+  - Énergie locale a priori : `E(y) = -α Σ y_i - β Σ_{i~j} y_i y_j`.
+  - Modèle de mesure aux capteurs : `K * obs_i ~ Binomial(K, p_i)` où `p_i`
+    est une fonction de `y_i` (par ex. `p = (1−q_0) * y + q_0 * (1−y)` pour
+    intégrer un taux de bruit `q_0`) — alternative simple : utiliser
+    `obs_i` comme étant `p_i` directement (capteur idéal).
+  - Estimation des paramètres `(α, β, q_0)` par **pseudo-vraisemblance**
+    (Besag) sur les capteurs, en traitant les voisins non observés comme
+    manquants.
+  - **Inférence** : échantillonneur de Gibbs conditionné sur les capteurs
+    observés pour produire `P(y_s = 1 | obs)` en chaque cellule.
+  - Implémentation custom NumPy/Numba (la grille fait 100k cellules,
+    attention à la performance — utiliser des updates vectorisés en
+    damier).
 - **Modèle de Potts** (généralisation à K classes) — optionnel, utile si on
   étend à classes (aptère/ailé/coccinelle).
 
@@ -340,12 +363,14 @@ Cette section est la plus volumineuse à coder. Prévoir des tests sur petite gr
 
 ### 7.6 Modèles bayésiens hiérarchiques (`hierarchical.py`)
 
-- **GLMM logistique avec effet aléatoire spatial Matérn** via PyMC :
+- **GLMM Binomial avec effet aléatoire spatial Matérn** via PyMC :
   ```
   logit(p_i) = β0 + β1 * d_bord_i + W_i
   W ~ MvNormal(0, K_Matern)
-  y_i ~ Bernoulli(p_i)
+  k_i ~ Binomial(K, p_i)         # k_i = K * obs_i, K = n_observations
   ```
+  Si `n_observations is None` (capteur idéal), utiliser une vraisemblance
+  Beta ou Normale tronquée sur `obs_i` directement.
 - Inférence par NUTS sur les capteurs ; prédiction par krigeage gaussien postérieur
   sur la grille complète.
 - Diagnostic via ArviZ (R-hat, ESS, trace plots).
@@ -354,9 +379,14 @@ Cette section est la plus volumineuse à coder. Prévoir des tests sur petite gr
 
 ### 7.7 Processus gaussien (`gp.py`)
 
-- `sklearn.gaussian_process.GaussianProcessClassifier` avec noyau Matérn pour la
-  classification binaire directe.
-- Alternative : `GPy` pour plus de flexibilité (noyaux composites, anisotropie).
+- **GP régression** sur les observations probabilistes (sortie continue dans
+  `[0, 1]`) avec noyau Matérn : `sklearn.gaussian_process.GaussianProcessRegressor`
+  avec clipping. Avantage : exploite directement la richesse de `obs ∈ [0, 1]`.
+- **GP classifier** : `sklearn.gaussian_process.GaussianProcessClassifier` sur
+  `obs > 0.5` binarisé — à conserver comme comparaison avec l'ancien pipeline
+  binaire.
+- Alternative : `GPy` pour plus de flexibilité (noyaux composites, anisotropie,
+  vraisemblance Binomial pour traiter `obs` comme `k/K`).
 - Sortie : probabilité prédite + variance approchée.
 
 ### 7.8 Apprentissage automatique (`ml.py`)
@@ -506,9 +536,11 @@ croissant de complexité d'implémentation :
 
 ## 14. Pièges connus à anticiper
 
-- **Krigeage sur binaire** : produit des probabilités hors [0,1] → clipper et
-  documenter. Le krigeage indicateur formel est préférable.
-- **Variogramme avec 20 points** : très instable. Augmenter en agrégeant plusieurs
+- **Krigeage sur observations probabilistes** : peut produire des prédictions
+  légèrement hors `[0, 1]` (effet numérique, beaucoup moins marqué qu'avec une
+  variable binaire) → clipper et documenter le pourcentage clippé.
+- **Variogramme avec 20 points** : moins instable qu'en binaire grâce à
+  l'observation graduée, mais reste sensible. Augmenter en agrégeant plusieurs
   séries temporelles (dates de déplacement des capteurs) si on veut un variogramme
   fiable.
 - **MRF / Ising convergence** : tester d'abord sur 20×20 avec paramètres connus.
@@ -520,9 +552,16 @@ croissant de complexité d'implémentation :
 - **Effet de bordure en covariable** : ne pas double-compter (si `f_edge` est dans
   la simulation, l'inclure aussi en covariable du modèle d'inférence est légitime
   et attendu, mais documenter le scénario où on l'ignore pour voir la robustesse).
-- **Petit nombre de positifs** : avec prévalence 5 % et 20 capteurs, on peut
-  avoir ~1 capteur positif. La plupart des méthodes seront instables. Inclure
-  des scénarios avec prévalence plus élevée (10-20 %) pour validation.
+- **Capteurs avec `obs ≈ 0` partout** : dans les régions à très faible prévalence,
+  un capteur avec K=50 a une probabilité non négligeable de retourner exactement 0
+  même si `prob > 0`. La variance des observations chute alors et le krigeage
+  retombe sur la baseline constante. Augmenter K (ou utiliser
+  `n_observations=None` pour la baseline théorique idéale) pour tester la
+  sensibilité.
+- **Choix de `K = n_observations`** : trop petit → bruit binomial domine la
+  variabilité spatiale ; trop grand → information saturée et coûteuse à obtenir
+  en pratique. Faire varier K dans `{10, 30, 50, 100, 1000}` pour quantifier le
+  compromis information/coût.
 
 ## 15. Extensions possibles
 
