@@ -90,7 +90,7 @@ aphid_spatial/
 
 **Python ≥ 3.11**, environnement géré par `uv` ou `conda`.
 
-### Dépendances principales
+### Dépendances installées (état actuel)
 
 ```toml
 [project]
@@ -106,29 +106,36 @@ dependencies = [
     "scikit-gstat>=1.0",     # variogrammes empiriques
     "pykrige>=1.7",          # krigeage ordinaire/universel/indicateur
 
-    # Statistiques spatiales
-    "libpysal>=4.10",        # poids spatiaux
+    # Statistiques spatiales (ajoutées round 3)
+    "libpysal>=4.10",        # poids spatiaux (KNN, distance, gaussien)
     "esda>=2.5",             # Moran, Geary, Getis-Ord, LISA
-    "spreg>=1.4",            # régression spatiale (SAR)
-    "pointpats>=2.4",        # processus ponctuels (Ripley)
+    "pointpats>=2.4",        # processus ponctuels (Ripley K/L/g)
 
-    # Bayésien
-    "pymc>=5.10",            # GLMM, MRF, hiérarchique
-    "arviz>=0.17",           # diagnostic MCMC
-
-    # ML
-    "scikit-learn>=1.4",     # GP, Random Forest, métriques
-    "gpy>=1.13",             # processus gaussiens flexibles
+    # ML (GP via sklearn ; RF via sklearn ; métriques)
+    "scikit-learn>=1.4",
 
     # Utilitaires
     "tqdm>=4.66",
     "joblib>=1.3",
-    "rasterio>=1.3",         # I/O raster pour exports
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff", "mypy", "jupyter"]
+dev = ["pytest", "pytest-cov", "ruff", "mypy", "jupyter", "ipykernel"]
 ```
+
+### Dépendances reportées (rounds ultérieurs)
+
+* `pymc>=5.10` + `arviz>=0.17` — pour §7.6 (GLMM bayésien) et §7.5
+  variantes CAR/BYM. Lourdes à installer ; à activer quand on aborde le
+  bayésien.
+* `spreg>=1.4` — pour la version fréquentiste de SAR (§7.5).
+* `gpy>=1.13` — alternative GP pour noyaux composites / vraisemblance
+  Binomial (à activer si la flexibilité de `sklearn.gaussian_process` est
+  insuffisante).
+* `rasterio>=1.3` — I/O raster pour exports (à activer quand on
+  produira des sorties géoréférencées pour le SIG).
+* `numba>=0.59` — pour la V2 optimisée du MRF Ising (V1 NumPy actuelle
+  suffit pour 100k cellules en ~7 s).
 
 ### Note sur INLA
 
@@ -288,33 +295,44 @@ class SpatialMethod(Protocol):
 - `BaselineConstant` (classe `SpatialMethod`) : prédit la prévalence empirique
   partout — borne inférieure de comparaison.
 
-### 7.2 Autocorrélation spatiale (`autocorrelation.py`)
+### 7.2 Autocorrélation spatiale (`autocorrelation.py`) ✅
 
-Avec ~20 capteurs c'est limite, mais utile pour caractériser. Utiliser `esda` et
-`libpysal`.
+Implémenté via `esda` et `libpysal`. Module **exploratoire** (pas de classe
+`SpatialMethod`) : les statistiques sont calculées sur les ~20 capteurs.
 
-- **Matrices de poids** : K plus proches voisins (K=3,5,8), distance avec seuil,
-  Gaussien-décroissant.
-- **I de Moran global** : test de l'autocorrélation globale ; permutations pour le
-  p-value.
-- **c de Geary global**.
-- **Getis-Ord G global** (pour tester clustering de valeurs hautes vs basses).
-- **LISA (Moran local)** : identifier capteurs en *cluster* HH/LL et *outliers*
-  HL/LH.
-- **Getis-Ord Gᵢ\*** : points chauds/froids locaux.
+- `compute_weights(coords, scheme, **kwargs)` — KNN (K=3,5,8), distance avec
+  seuil, gaussien-décroissant ; row-standardised.
+- `moran_global` — I de Moran avec permutations.
+- `geary_global` — c de Geary.
+- `getis_ord_global` — G global pour clustering valeurs hautes/basses.
+- `moran_local` — LISA (Moran local) avec quadrants HH/LL/HL/LH et p-values
+  par permutation.
+- `getis_ord_local` — Gᵢ\* local (hot/cold spots).
+- `autocorrelation_summary` — récapitulatif global + local en une passe.
 
-Sortie : `dict` avec statistique, p-value, et carte LISA.
+**Garde-fou** : si `var(obs) == 0` ou `n_sensors < 4`, retourne NaN sans
+planter. Reproductibilité via wrapper `_SeedScope` (esda 2.7 ne prend pas
+`seed` en kwarg).
 
-### 7.3 Processus ponctuels (`point_process.py`)
+### 7.3 Processus ponctuels (`point_process.py`) ✅
 
-Utile si on traite les capteurs « positifs » comme un semis ponctuel sous la
-référence de tous les capteurs.
+Implémenté via `pointpats.distance_statistics`. Utile pour tester si les
+capteurs (ou leur sous-ensemble pondéré par `obs`) suivent un processus de
+Poisson homogène (CSR).
 
-- **Fonction K de Ripley** avec correction des effets de bord (Ripley, isotropic).
-- **Fonction L** = √(K/π) - r.
-- **Fonction g de pair-correlation**.
-- **Test de complète aléa spatial (CSR)** par enveloppes Monte Carlo.
-- **Lambda(s) — intensité par lissage** (KDE 2D).
+- `ripley_k(coords, radii)` — K(r) de Ripley.
+- `ripley_l(coords, radii)` — L(r) = √(K(r)/π) − r ; ≈ 0 sous CSR.
+- `pair_correlation(coords, radii)` — g(r) ≈ K'(r) / (2πr) par
+  différences finies.
+- `csr_envelope(coords, radii, statistic, n_sim, support)` — enveloppe
+  Monte Carlo de la statistique sous CSR ; renvoie `observed`, `low`,
+  `high`, `mean` et l'array des `radii`.
+- `kde_intensity(coords, query_coords, bandwidth, weights)` — λ(s) via
+  Gaussian KDE 2D pondérée (utile vu que `obs ∈ [0, 1]`).
+- `weighted_ripley_k(coords, weights, radii)` — variante pondérée
+  manuelle où chaque paire `(i, j)` contribue `w_i × w_j`.
+- `support_from_field(field)` — bounding box du champ comme support par
+  défaut.
 
 ### 7.4 Géostatistique (`geostatistics.py`)
 
@@ -351,18 +369,21 @@ C'est l'« approche contextuelle markovienne » mentionnée dans la thèse.
   (présence/absence par plant) ; les observations probabilistes des capteurs
   sont gérées par un modèle de mesure Binomial.
   - Énergie locale a priori : `E(y) = -α Σ y_i - β Σ_{i~j} y_i y_j`.
-  - Modèle de mesure aux capteurs : `K * obs_i ~ Binomial(K, p_i)` où `p_i`
-    est une fonction de `y_i` (par ex. `p = (1−q_0) * y + q_0 * (1−y)` pour
-    intégrer un taux de bruit `q_0`) — alternative simple : utiliser
-    `obs_i` comme étant `p_i` directement (capteur idéal).
-  - Estimation des paramètres `(α, β, q_0)` par **pseudo-vraisemblance**
-    (Besag) sur les capteurs, en traitant les voisins non observés comme
-    manquants.
+  - V1 (implémentée, NumPy) : conditionnement strict aux capteurs en
+    binarisant `obs_i > threshold` (par défaut 0.5). Estimation `(α, β)`
+    par pseudo-vraisemblance Besag sur le champ initial bruité, puis
+    Gibbs sampler en damier (mises à jour vectorisées). ~7 s pour 100k
+    cellules sur le scénario par défaut.
+  - V2 (à venir) : modèle de mesure Binomial complet
+    `k_i = K · obs_i ~ Binomial(K, p_i)` avec `p = (1−q_0) y + q_0 (1−y)`
+    (taux de bruit `q_0`), estimation EM alternant Gibbs et estimation
+    PL ; portage Numba pour > 5× gain de performance.
   - **Inférence** : échantillonneur de Gibbs conditionné sur les capteurs
     observés pour produire `P(y_s = 1 | obs)` en chaque cellule.
-  - Implémentation custom NumPy/Numba (la grille fait 100k cellules,
-    attention à la performance — utiliser des updates vectorisés en
-    damier).
+  - **Limitation V1** : avec ~20 capteurs sur 100k cellules, la PL estime
+    souvent `β ≈ 0` (manque d'identifiabilité), réduisant l'Ising à une
+    quasi-baseline. Voir `04_lattice_mrf.ipynb` pour la sensibilité au
+    seuil de binarisation et le diagnostic.
 - **Modèle de Potts** (généralisation à K classes) — optionnel, utile si on
   étend à classes (aptère/ailé/coccinelle).
 
@@ -538,20 +559,22 @@ croissant de complexité d'implémentation :
 3. ✅ **Évaluation minimale** — métriques et `BaselineConstant`.
 4. **Méthodes simples** :
    - ✅ exploration (descriptifs + baseline) ;
-   - ⏳ autocorrélation (Moran, LISA) — nécessite `libpysal` + `esda`.
+   - ✅ autocorrélation (Moran I/Geary c/Getis-Ord G/LISA/Gᵢ\*) via
+     `libpysal` + `esda`.
 5. ✅ **Géostatistique** — variogramme + `OrdinaryKrigingIndicator`,
    `UniversalKrigingEdge`, `IndicatorKrigingThreshold`.
-6. ⏳ **Processus ponctuels** — Ripley K + tests CSR (nécessite `pointpats`).
+6. ✅ **Processus ponctuels** — Ripley K/L/g + enveloppe CSR + KDE
+   d'intensité via `pointpats`.
 7. ✅ **GP classifier + GP régression** (baseline ML rapide).
 8. ✅ **Random Forest** géo-aware.
-9. ⏳ **MRF / Ising** — méthode-clé thèse, prévoir 2 itérations (V1 NumPy,
-   V2 optimisée Numba).
+9. ✅ **MRF / Ising V1 NumPy** — pseudo-vraisemblance + Gibbs damier
+   conditionné (V2 Numba à prévoir si besoin).
 10. ⏳ **GLMM bayésien** — prévoir long temps de calcul (PyMC).
 11. ⏳ **CAR/SAR/BYM** — variantes lattice.
 12. ✅ **SADIE** — version simplifiée (concentration + IDW + permutations).
-13. ⏳ **Comparaison globale** — script orchestrateur + figures finales
-    (`07_comparison.ipynb`). Le notebook `06_ml_methods.ipynb` couvre déjà
-    la comparaison des méthodes implémentées.
+13. ✅ **Comparaison globale** — `07_comparison.ipynb` orchestre les 9
+    méthodes implémentées sur 5 schémas de placement, sauve
+    `outputs/results/07_comparison.csv` + heatmap + boxplot.
 
 Légende : ✅ implémenté · ⏳ à faire dans un round ultérieur.
 

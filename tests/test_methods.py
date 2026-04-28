@@ -6,6 +6,14 @@ import numpy as np
 import pytest
 
 from aphid_spatial.methods import SpatialMethod
+from aphid_spatial.methods.autocorrelation import (
+    autocorrelation_summary,
+    compute_weights,
+    geary_global,
+    getis_ord_local,
+    moran_global,
+    moran_local,
+)
 from aphid_spatial.methods.exploration import (
     BaselineConstant,
     descriptive_summary,
@@ -20,7 +28,20 @@ from aphid_spatial.methods.geostatistics import (
     UniversalKrigingEdge,
 )
 from aphid_spatial.methods.gp import MaternGPClassifier, MaternGPRegressor
+from aphid_spatial.methods.lattice import (
+    IsingMRF,
+    estimate_params_pseudo_likelihood,
+)
 from aphid_spatial.methods.ml import SpatialRandomForest
+from aphid_spatial.methods.point_process import (
+    csr_envelope,
+    kde_intensity,
+    pair_correlation,
+    ripley_k,
+    ripley_l,
+    support_from_field,
+    weighted_ripley_k,
+)
 from aphid_spatial.methods.sadie import SADIE, aggregation_index, local_indices
 from aphid_spatial.simulation import (
     Field,
@@ -247,3 +268,212 @@ def test_local_indices_zero_when_constant() -> None:
     values = np.full(10, 0.5)
     v = local_indices(coords, values)
     assert np.allclose(v, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Autocorrélation spatiale
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def med_readings() -> tuple[Field, SensorReadings]:
+    """Champ moyen avec 30 capteurs pour que les stats spatiales soient
+    raisonnablement définies."""
+    f = simulate_field(
+        FieldConfig(
+            n_rows=30, n_cols=200, base_prevalence=0.20, edge_strength=0.5,
+            n_hotspots=(2, 4), seed=77,
+        )
+    )
+    r = place_sensors(
+        f, SensorConfig(n_sensors=30, placement="uniform", seed=11)
+    )
+    return f, r
+
+
+def test_compute_weights_schemes(med_readings: tuple[Field, SensorReadings]) -> None:
+    _, r = med_readings
+    w_knn = compute_weights(r.coords, scheme="knn", k=4)
+    w_dist = compute_weights(r.coords, scheme="distance", threshold=20.0)
+    w_gauss = compute_weights(r.coords, scheme="gaussian", bandwidth=10.0)
+    assert w_knn.n == r.coords.shape[0]
+    assert w_dist.n == r.coords.shape[0]
+    assert w_gauss.n == r.coords.shape[0]
+
+
+def test_moran_global_returns_finite(med_readings: tuple[Field, SensorReadings]) -> None:
+    _, r = med_readings
+    w = compute_weights(r.coords, scheme="knn", k=5)
+    out = moran_global(r, w, n_perm=99, seed=0)
+    for key in ("I", "p_value", "z_score"):
+        assert key in out
+        assert np.isfinite(out[key])
+    assert 0.0 <= out["p_value"] <= 1.0
+
+
+def test_geary_global_returns_finite(med_readings: tuple[Field, SensorReadings]) -> None:
+    _, r = med_readings
+    w = compute_weights(r.coords, scheme="knn", k=5)
+    out = geary_global(r, w, n_perm=99, seed=0)
+    assert np.isfinite(out["c"])
+    assert 0.0 <= out["p_value"] <= 1.0
+
+
+def test_moran_local_shapes(med_readings: tuple[Field, SensorReadings]) -> None:
+    _, r = med_readings
+    w = compute_weights(r.coords, scheme="knn", k=5)
+    out = moran_local(r, w, n_perm=99, seed=0)
+    n = r.coords.shape[0]
+    for key in ("Is", "p_sim", "q", "hh", "ll", "hl", "lh"):
+        assert key in out
+        assert out[key].shape == (n,)
+
+
+def test_getis_ord_local_shapes(med_readings: tuple[Field, SensorReadings]) -> None:
+    _, r = med_readings
+    w = compute_weights(r.coords, scheme="knn", k=5)
+    out = getis_ord_local(r, w, n_perm=99, seed=0)
+    assert out["Gs"].shape == (r.coords.shape[0],)
+    assert out["Zs"].shape == (r.coords.shape[0],)
+
+
+def test_autocorrelation_summary_keys(med_readings: tuple[Field, SensorReadings]) -> None:
+    _, r = med_readings
+    w = compute_weights(r.coords, scheme="knn", k=5)
+    out = autocorrelation_summary(r, w, n_perm=99, seed=0)
+    for key in (
+        "moran_I", "moran_p_value", "geary_c", "geary_p_value",
+        "getis_G", "getis_p_value", "lisa_q", "gistar_Zs",
+    ):
+        assert key in out
+
+
+def test_moran_degenerate_returns_nan() -> None:
+    """Avec var=0, Moran retourne NaN sans planter."""
+    f_dummy = simulate_field(FieldConfig(n_rows=10, n_cols=10, seed=0))
+    r = place_sensors(f_dummy, SensorConfig(n_sensors=10, seed=0))
+    r.obs[:] = 0.5  # variance nulle
+    w = compute_weights(r.coords, scheme="knn", k=3)
+    out = moran_global(r, w, n_perm=10, seed=0)
+    assert np.isnan(out["I"])
+
+
+# ---------------------------------------------------------------------------
+# Processus ponctuels
+# ---------------------------------------------------------------------------
+
+
+def test_ripley_k_l_shapes(mini_readings: SensorReadings) -> None:
+    out_k = ripley_k(mini_readings.coords)
+    out_l = ripley_l(mini_readings.coords)
+    assert out_k["radii"].shape == out_k["K"].shape
+    assert out_l["L"].shape == out_l["radii"].shape
+    # K(0) = 0
+    assert out_k["K"][0] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_pair_correlation_finite(mini_readings: SensorReadings) -> None:
+    out = pair_correlation(mini_readings.coords)
+    # NaN à r=0 attendu, mais le reste doit être fini
+    assert np.isfinite(out["g"][1:]).all()
+
+
+def test_csr_envelope_includes_observed(mini_readings: SensorReadings) -> None:
+    """Sur un petit nombre de points, l'observed peut sortir de
+    l'enveloppe ; on vérifie au moins la forme et la cohérence low <= high."""
+    env = csr_envelope(
+        mini_readings.coords, statistic="L", n_sim=20, seed=0,
+    )
+    assert env["radii"].shape == env["observed"].shape
+    assert env["low"].shape == env["high"].shape
+    # low <= mean <= high (à NaN près)
+    valid = ~(np.isnan(env["low"]) | np.isnan(env["high"]))
+    assert (env["low"][valid] <= env["high"][valid]).all()
+
+
+def test_kde_intensity_positive(
+    mini_field: Field, mini_readings: SensorReadings
+) -> None:
+    intens = kde_intensity(
+        mini_readings.coords, mini_field.coords[:50], bandwidth=2.0
+    )
+    assert intens.shape == (50,)
+    assert (intens >= 0.0).all()
+
+
+def test_weighted_ripley_k_zero_at_zero(
+    mini_field: Field, mini_readings: SensorReadings
+) -> None:
+    out = weighted_ripley_k(
+        mini_readings.coords, mini_readings.obs,
+        support=support_from_field(mini_field),
+    )
+    assert out["K"][0] == pytest.approx(0.0, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Ising MRF
+# ---------------------------------------------------------------------------
+
+
+def test_ising_mrf_basic(mini_field: Field, mini_readings: SensorReadings) -> None:
+    method = IsingMRF(neighborhood="rook", n_burn=20, n_samples=30, seed=0)
+    method.fit(mini_readings, mini_field)
+    _check_method_basic(method, mini_field)
+    sigma = method.predict_uncertainty(mini_field.coords)
+    assert sigma is not None
+    assert sigma.shape == (mini_field.coords.shape[0],)
+    params = method.params
+    for key in ("alpha", "beta", "fit_seconds", "n_iter_kept"):
+        assert key in params
+
+
+def test_ising_respects_explicit_params(
+    mini_field: Field, mini_readings: SensorReadings
+) -> None:
+    """Avec alpha/beta fournis, ils doivent être utilisés tels quels."""
+    method = IsingMRF(
+        alpha=-2.0, beta=0.0, n_burn=10, n_samples=20, seed=0,
+    )
+    method.fit(mini_readings, mini_field)
+    p = method.params
+    assert p["alpha"] == -2.0
+    assert p["beta"] == 0.0
+
+
+def test_ising_beta_zero_predicts_sigmoid_alpha(
+    mini_field: Field, mini_readings: SensorReadings
+) -> None:
+    """Avec β=0, les cellules non-capteurs convergent vers σ(α) ≈ 0.27 pour
+    α=-1 (test à seuil large)."""
+    from scipy.special import expit
+    alpha = -1.0
+    method = IsingMRF(alpha=alpha, beta=0.0, n_burn=50, n_samples=200, seed=0)
+    method.fit(mini_readings, mini_field)
+    p = method.predict_proba(mini_field.coords)
+    expected = float(expit(alpha))
+    # Inclure les capteurs dans la moyenne ; la majorité des cellules doit
+    # être proche de σ(α)
+    assert abs(p.mean() - expected) < 0.1
+
+
+def test_estimate_params_pseudo_likelihood_recovers_alpha() -> None:
+    """Sur un champ aléatoire (β=0), la PL doit retrouver α ≈ logit(p)."""
+    rng = np.random.default_rng(0)
+    p_true = 0.3
+    y = (rng.random((40, 40)) < p_true).astype(np.int8)
+    alpha_est, beta_est = estimate_params_pseudo_likelihood(y, queen=False)
+    expected_alpha = float(np.log(p_true / (1 - p_true)))
+    # PL biaisée pour β mais α doit être proche
+    assert abs(alpha_est - expected_alpha) < 0.5
+    assert abs(beta_est) < 0.5
+
+
+def test_ising_fallback_few_sensors() -> None:
+    """Avec < 3 capteurs, fallback constant."""
+    f = simulate_field(FieldConfig(n_rows=10, n_cols=20, seed=0))
+    r = place_sensors(f, SensorConfig(n_sensors=2, seed=0))
+    method = IsingMRF(seed=0)
+    method.fit(r, f)
+    p = method.predict_proba(f.coords)
+    assert np.allclose(p, p[0])  # constante

@@ -26,7 +26,7 @@ Phases couvertes :
 - **Phase 2** : 5 schémas de placement des capteurs (modèle d'observation
   probabiliste binomial).
 - **Évaluation** : AUC ROC/PR, Brier, log-loss, MAE/RMSE, calibration.
-- **Méthodes implémentées** :
+- **Méthodes prédictives implémentées** :
   - `BaselineConstant` — borne inférieure (prévalence empirique).
   - `OrdinaryKrigingIndicator` — krigeage ordinaire (référence).
   - `UniversalKrigingEdge` — krigeage universel avec dérive distance-au-bord.
@@ -35,15 +35,21 @@ Phases couvertes :
   - `SpatialRandomForest` — RF géo-aware avec features dérivées.
   - `SADIE` — indices d'agrégation (Perry 1995, version simplifiée) +
     interpolation IDW.
-- **Helpers exploratoires** (``methods.exploration``) : distance au bord,
-  distance/valeur du capteur le plus proche, distances inter-capteurs.
+  - `IsingMRF` — Markov Random Field V1 NumPy (Gibbs damier conditionné).
+- **Modules exploratoires** (statistiques, pas de prédiction directe) :
+  - `methods.exploration` — distance au bord, helpers capteur proche,
+    distances inter-capteurs.
+  - `methods.autocorrelation` — Moran I, Geary c, Getis-Ord G, LISA,
+    Gᵢ\* (libpysal + esda).
+  - `methods.point_process` — Ripley K/L/g, enveloppe CSR Monte Carlo,
+    KDE d'intensité (pointpats).
 - **Visualisation** : cartes 2D (vérité, prédiction, incertitude, erreur).
-- **Notebooks** : `01_simulation`, `02_exploration`, `03_geostatistics`,
-  `06_ml_methods` (comparaison de toutes les méthodes).
+- **Notebooks** : `01_simulation`, `02_exploration` (avec autocorr + Ripley),
+  `03_geostatistics`, `04_lattice_mrf`, `06_ml_methods`,
+  `07_comparison` (orchestrateur 9 méthodes × 5 schémas).
 
-Méthodes prévues pour les rounds suivants : autocorrélation (Moran/LISA via
-``libpysal``/``esda``), processus ponctuels (Ripley K via ``pointpats``),
-MRF/Ising (NumPy/Numba custom), GLMM bayésien (PyMC), CAR/SAR/BYM.
+Méthodes prévues pour les rounds suivants : GLMM bayésien (PyMC), CAR/BYM,
+SAR fréquentiste (spreg), V2 optimisée Numba du MRF.
 
 ## Installation
 
@@ -114,7 +120,7 @@ sur la probabilité vraie.
 ## Reproduire les résultats principaux
 
 ```bash
-pytest                                    # 62 tests, doivent tous passer
+pytest                                    # 79 tests, doivent tous passer
 jupyter nbconvert --to notebook --execute --inplace notebooks/*.ipynb
 ```
 
@@ -123,9 +129,9 @@ dans `outputs/results/`.
 
 ## Résultats actuels
 
-Comparaison des 8 méthodes implémentées sur le scénario par défaut
+Comparaison des 9 méthodes implémentées sur le scénario par défaut
 (champ 100×1000, 20 capteurs uniformes, K = 50 mesures temporelles,
-seed 2024) — extrait de `outputs/results/06_ml_methods_metrics.csv` :
+seed 2024) — extrait de `outputs/results/07_comparison.csv` :
 
 | Méthode                       | AUC ROC | AUC PR | Brier | RMSE p̂ | MAE p̂  |
 |-------------------------------|--------:|-------:|------:|--------:|-------:|
@@ -136,12 +142,18 @@ seed 2024) — extrait de `outputs/results/06_ml_methods_metrics.csv` :
 | `gp_matern_classifier`        |   0.636 |  0.355 | 0.178 |   0.169 |  0.127 |
 | `indicator_kriging_threshold` |   0.630 |  0.366 | 0.197 |   0.219 |  0.167 |
 | `spatial_random_forest`       |   0.622 |  0.349 | 0.175 |   0.160 |  0.115 |
+| `ising_mrf_v1`                |   0.501 |  0.240 | 0.183 |   0.183 |  0.143 |
 | `baseline_constant`           |   0.500 |  0.239 | 0.182 |   0.181 |  0.141 |
 
 Le **krigeage universel avec dérive distance-au-bord** arrive en tête —
 l'effet de bordure documenté en littérature est bien capturé en
-l'incorporant comme covariable. Voir le notebook `06_ml_methods.ipynb`
-pour les cartes prédites et les diagnostics SADIE.
+l'incorporant comme covariable. L'**Ising MRF V1** est presque équivalent
+à la baseline constante : avec 20 capteurs sparses, la pseudo-vraisemblance
+estime ``β ≈ 0`` (manque d'identifiabilité). Une V2 EM + Numba est prévue.
+
+Voir `04_lattice_mrf.ipynb` pour la validation Ising sur petite grille,
+`06_ml_methods.ipynb` pour la comparaison ML, et `07_comparison.ipynb`
+pour la robustesse aux schémas de placement (heatmap + box-plots).
 
 ## Tests
 

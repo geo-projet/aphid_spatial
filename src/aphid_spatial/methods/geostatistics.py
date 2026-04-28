@@ -260,7 +260,9 @@ class UniversalKrigingEdge:
                     verbose=False,
                     exact_values=True,
                 )
-            self._fallback_value = None
+            # On garde la moyenne empirique comme valeur de repli en cas de
+            # système singulier au moment du predict (placement "grid" surtout).
+            self._fallback_value = float(z.mean())
             logger.info(
                 "UK fit OK : n=%d, model=%s, params=%s",
                 z.size,
@@ -282,14 +284,24 @@ class UniversalKrigingEdge:
         xq = query_coords[:, 0].astype(np.float64)
         yq = query_coords[:, 1].astype(np.float64)
         edge_q = _edge_distance_at_coords(query_coords, self._field)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            z, _ss = self._kriger.execute(
-                "points",
-                xq,
-                yq,
-                backend="vectorized",
-                specified_drift_arrays=[edge_q],
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                z, _ss = self._kriger.execute(
+                    "points",
+                    xq,
+                    yq,
+                    backend="vectorized",
+                    specified_drift_arrays=[edge_q],
+                )
+        except np.linalg.LinAlgError as exc:
+            # Système de krigeage singulier (capteurs colinéaires sur la dérive,
+            # cas typique du placement "grid"). On bascule sur la baseline.
+            logger.warning("UK predict singular (%s) -> baseline constante", exc)
+            return np.full(
+                query_coords.shape[0],
+                self._fallback_value if self._fallback_value is not None else 0.0,
+                dtype=np.float64,
             )
         z_arr = np.asarray(z, dtype=np.float64).ravel()
         clipped = (z_arr < 0.0) | (z_arr > 1.0)
@@ -310,15 +322,18 @@ class UniversalKrigingEdge:
         xq = query_coords[:, 0].astype(np.float64)
         yq = query_coords[:, 1].astype(np.float64)
         edge_q = _edge_distance_at_coords(query_coords, self._field)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            _z, ss = self._kriger.execute(
-                "points",
-                xq,
-                yq,
-                backend="vectorized",
-                specified_drift_arrays=[edge_q],
-            )
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                _z, ss = self._kriger.execute(
+                    "points",
+                    xq,
+                    yq,
+                    backend="vectorized",
+                    specified_drift_arrays=[edge_q],
+                )
+        except np.linalg.LinAlgError:
+            return None
         ss_arr = np.asarray(ss, dtype=np.float64).ravel()
         return np.sqrt(np.maximum(ss_arr, 0.0))
 

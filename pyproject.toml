@@ -24,7 +24,12 @@ dependencies = [
     "scikit-gstat>=1.0",
     "pykrige>=1.7",
 
-    # ML (utilisé pour les métriques dans ce round)
+    # Statistiques spatiales
+    "libpysal>=4.10",
+    "esda>=2.5",
+    "pointpats>=2.4",
+
+    # ML (utilisé pour GP, RF, métriques)
     "scikit-learn>=1.4",
 
     # Utilitaires
