@@ -275,10 +275,18 @@ class SpatialMethod(Protocol):
 
 ### 7.1 Exploration et statistiques descriptives (`exploration.py`)
 
-- Carte des observations (présences/absences sur les capteurs).
-- Distance au plus proche capteur en chaque point.
-- Histogramme des distances inter-capteurs.
-- Test naïf : prévalence empirique = baseline (probabilité constante).
+- Carte des observations sur les capteurs (gérée par `visualization.maps.plot_sensors`).
+- `nearest_sensor_distance(readings, query_coords)` : distance au capteur le plus
+  proche en tout point.
+- `nearest_sensor_value(readings, query_coords)` : valeur ``obs`` du capteur le
+  plus proche (utilisé comme feature par le RF).
+- `inter_sensor_distances(readings)` : toutes les distances inter-capteurs
+  (pour histogramme).
+- `edge_distance(field_meta)` : distance au bord pour chaque cellule (utilisé
+  comme covariable par UK et RF).
+- `descriptive_summary(readings, field_meta)` : résumé numérique en une passe.
+- `BaselineConstant` (classe `SpatialMethod`) : prédit la prévalence empirique
+  partout — borne inférieure de comparaison.
 
 ### 7.2 Autocorrélation spatiale (`autocorrelation.py`)
 
@@ -401,11 +409,20 @@ Cette section est la plus volumineuse à coder. Prévoir des tests sur petite gr
 
 Méthode entomologique classique (Perry 1995) — implémentation simplifiée :
 
-- Calculer l'indice d'agrégation `I_a` basé sur la distance minimale pour ré-arranger
-  les points jusqu'à régularité.
-- Identifier *clusters* (`v_i > 0`) et *gaps* (`v_i < 0`) localement.
-- Plus exploratoire que prédictif. Bibliothèque Python existante : aucune mature ;
-  implémenter une version minimale.
+- L'indice d'agrégation original repose sur une **distance de rearrangement**
+  (transport optimal vers la régularité). Pour rester en Python pur sans
+  dépendance optimal-transport, on substitue une **mesure de concentration au
+  barycentre pondéré** : la distance moyenne pondérée des points au barycentre
+  des valeurs. La logique reste la même : comparer la statistique observée à
+  une distribution sous permutation aléatoire des valeurs sur les positions
+  fixes.
+- Identifier *clusters* (`v_i > 0`) et *gaps* (`v_i < 0`) localement via un
+  z-score (`(obs - mean) / std`) — version la plus simple.
+- Plus exploratoire que prédictif ; pour l'interface `SpatialMethod`, on
+  fournit en plus une interpolation **inverse-distance-weighted** (IDW) sur
+  les capteurs, ce qui donne une carte continue par défaut.
+- Les résultats SADIE (statistiques globales et `v_i`) sont accessibles via
+  les propriétés `stats` et `v_local` après `fit`.
 
 ## 8. Phase 4 — Évaluation et comparaison
 
@@ -471,8 +488,14 @@ ColorBrewer-safe (ex. `viridis`, `RdBu_r`).
 
 ## 10. Conventions de code
 
-- **Style** : `ruff` (avec règles E, F, I, N, UP, B, SIM, RUF).
-- **Typage** : annotations partout ; `mypy --strict` sur `src/`.
+- **Style** : `ruff` (avec règles E, F, I, N, UP, B, SIM, RUF). Les règles
+  `RUF001/002/003/046` sont ignorées globalement (faux positifs sur les
+  caractères mathématiques `σ`, `μ`, `×` et sur `int(np.sqrt(...))`).
+- **Typage** : annotations partout. `mypy --strict` est trop lourd avec les
+  stubs NumPy ; on utilise un mode relâché (`check_untyped_defs`,
+  `warn_unused_ignores`, `warn_redundant_casts`, `no_implicit_optional`)
+  qui garde les annotations comme documentation et attrape les erreurs
+  vraies.
 - **Docstrings** : style NumPy.
 - **Tests** : `pytest`, couverture cible >80% sur `src/aphid_spatial/simulation/`
   et `evaluation/`.
@@ -510,20 +533,27 @@ ColorBrewer-safe (ex. `viridis`, `RdBu_r`).
 Les phases 1 et 2 sont prérequis ; ensuite, attaquer les méthodes par ordre
 croissant de complexité d'implémentation :
 
-1. **Phase 1** — Simulation du champ + visualisation de base.
-2. **Phase 2** — Placement aléatoire des capteurs + observation parfaite.
-3. **Évaluation minimale** — métriques et baseline (prévalence constante).
-4. **Méthodes simples** — exploration, autocorrélation (Moran, LISA).
-5. **Géostatistique** — variogramme + krigeage ordinaire (pipeline de référence).
-6. **Processus ponctuels** — Ripley K + tests CSR.
-7. **GP classifier** — baseline ML rapide.
-8. **Random Forest** — baseline ML.
-9. **MRF / Ising** — méthode-clé thèse, prévoir 2 itérations (V1 simple, V2
-   optimisée Numba).
-10. **GLMM bayésien** — prévoir long temps de calcul.
-11. **CAR/SAR/BYM** — variantes lattice.
-12. **SADIE** — implémentation minimale.
-13. **Comparaison globale** — script orchestrateur + figures finales.
+1. ✅ **Phase 1** — Simulation du champ + visualisation de base.
+2. ✅ **Phase 2** — Placement (5 schémas) + observation probabiliste Binomial.
+3. ✅ **Évaluation minimale** — métriques et `BaselineConstant`.
+4. **Méthodes simples** :
+   - ✅ exploration (descriptifs + baseline) ;
+   - ⏳ autocorrélation (Moran, LISA) — nécessite `libpysal` + `esda`.
+5. ✅ **Géostatistique** — variogramme + `OrdinaryKrigingIndicator`,
+   `UniversalKrigingEdge`, `IndicatorKrigingThreshold`.
+6. ⏳ **Processus ponctuels** — Ripley K + tests CSR (nécessite `pointpats`).
+7. ✅ **GP classifier + GP régression** (baseline ML rapide).
+8. ✅ **Random Forest** géo-aware.
+9. ⏳ **MRF / Ising** — méthode-clé thèse, prévoir 2 itérations (V1 NumPy,
+   V2 optimisée Numba).
+10. ⏳ **GLMM bayésien** — prévoir long temps de calcul (PyMC).
+11. ⏳ **CAR/SAR/BYM** — variantes lattice.
+12. ✅ **SADIE** — version simplifiée (concentration + IDW + permutations).
+13. ⏳ **Comparaison globale** — script orchestrateur + figures finales
+    (`07_comparison.ipynb`). Le notebook `06_ml_methods.ipynb` couvre déjà
+    la comparaison des méthodes implémentées.
+
+Légende : ✅ implémenté · ⏳ à faire dans un round ultérieur.
 
 ## 13. Livrables attendus
 

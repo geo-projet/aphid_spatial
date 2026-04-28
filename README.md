@@ -114,12 +114,34 @@ sur la probabilité vraie.
 ## Reproduire les résultats principaux
 
 ```bash
-pytest                                    # 49 tests, doivent tous passer
+pytest                                    # 62 tests, doivent tous passer
 jupyter nbconvert --to notebook --execute --inplace notebooks/*.ipynb
 ```
 
-Les figures sont écrites dans `outputs/figures/` et un CSV de métriques
+Les figures sont écrites dans `outputs/figures/` et les CSV de métriques
 dans `outputs/results/`.
+
+## Résultats actuels
+
+Comparaison des 8 méthodes implémentées sur le scénario par défaut
+(champ 100×1000, 20 capteurs uniformes, K = 50 mesures temporelles,
+seed 2024) — extrait de `outputs/results/06_ml_methods_metrics.csv` :
+
+| Méthode                       | AUC ROC | AUC PR | Brier | RMSE p̂ | MAE p̂  |
+|-------------------------------|--------:|-------:|------:|--------:|-------:|
+| `universal_kriging_edge`      |   0.681 |  0.383 | 0.169 |   0.140 |  0.101 |
+| `sadie_simplified`            |   0.680 |  0.397 | 0.169 |   0.139 |  0.104 |
+| `ordinary_kriging_indicator`  |   0.672 |  0.379 | 0.170 |   0.142 |  0.105 |
+| `gp_matern_regressor`         |   0.658 |  0.363 | 0.172 |   0.150 |  0.112 |
+| `gp_matern_classifier`        |   0.636 |  0.355 | 0.178 |   0.169 |  0.127 |
+| `indicator_kriging_threshold` |   0.630 |  0.366 | 0.197 |   0.219 |  0.167 |
+| `spatial_random_forest`       |   0.622 |  0.349 | 0.175 |   0.160 |  0.115 |
+| `baseline_constant`           |   0.500 |  0.239 | 0.182 |   0.181 |  0.141 |
+
+Le **krigeage universel avec dérive distance-au-bord** arrive en tête —
+l'effet de bordure documenté en littérature est bien capturé en
+l'incorporant comme covariable. Voir le notebook `06_ml_methods.ipynb`
+pour les cartes prédites et les diagnostics SADIE.
 
 ## Tests
 
