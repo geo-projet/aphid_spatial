@@ -58,6 +58,7 @@ ignore = [
     "N806",   # variable-name-lowercase (idem)
     "RUF001", # ambiguous-unicode-character-string (σ, μ, etc. utilisés en notation mathématique)
     "RUF002", # ambiguous-unicode-character-docstring (×, σ, etc. en notation mathématique)
+    "RUF003", # ambiguous-unicode-character-comment (idem en commentaires)
     "RUF046", # unnecessary-int-on-cast (faux positifs sur np.sqrt/np.ceil)
 ]
 

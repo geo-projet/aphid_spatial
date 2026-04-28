@@ -18,21 +18,32 @@ observations partielles.
 
 Voir `CLAUDE.md` pour la spécification détaillée.
 
-## État actuel (round 1)
+## État actuel
 
 Phases couvertes :
 
 - **Phase 1** : simulation du champ (effet de bordure + GRF Matérn + foyers).
-- **Phase 2** : 5 schémas de placement des capteurs.
-- **Évaluation** : métriques de base (AUC ROC/PR, Brier, log-loss, MAE/RMSE,
-  calibration).
-- **Méthode baseline** : krigeage ordinaire indicateur.
+- **Phase 2** : 5 schémas de placement des capteurs (modèle d'observation
+  probabiliste binomial).
+- **Évaluation** : AUC ROC/PR, Brier, log-loss, MAE/RMSE, calibration.
+- **Méthodes implémentées** :
+  - `BaselineConstant` — borne inférieure (prévalence empirique).
+  - `OrdinaryKrigingIndicator` — krigeage ordinaire (référence).
+  - `UniversalKrigingEdge` — krigeage universel avec dérive distance-au-bord.
+  - `IndicatorKrigingThreshold` — krigeage sur ``obs > seuil``.
+  - `MaternGPRegressor` / `MaternGPClassifier` — processus gaussiens.
+  - `SpatialRandomForest` — RF géo-aware avec features dérivées.
+  - `SADIE` — indices d'agrégation (Perry 1995, version simplifiée) +
+    interpolation IDW.
+- **Helpers exploratoires** (``methods.exploration``) : distance au bord,
+  distance/valeur du capteur le plus proche, distances inter-capteurs.
 - **Visualisation** : cartes 2D (vérité, prédiction, incertitude, erreur).
-- **Notebooks** : `01_simulation`, `02_exploration`, `03_geostatistics`.
+- **Notebooks** : `01_simulation`, `02_exploration`, `03_geostatistics`,
+  `06_ml_methods` (comparaison de toutes les méthodes).
 
-Méthodes prévues pour les rounds suivants : autocorrélation (Moran/LISA),
-processus ponctuels (Ripley K), GP, Random Forest, MRF/Ising, GLMM bayésien,
-SADIE.
+Méthodes prévues pour les rounds suivants : autocorrélation (Moran/LISA via
+``libpysal``/``esda``), processus ponctuels (Ripley K via ``pointpats``),
+MRF/Ising (NumPy/Numba custom), GLMM bayésien (PyMC), CAR/SAR/BYM.
 
 ## Installation
 
@@ -53,7 +64,12 @@ pip install -e ".[dev]"
 
 ```python
 from aphid_spatial.simulation import FieldConfig, simulate_field, SensorConfig, place_sensors
-from aphid_spatial.methods.geostatistics import OrdinaryKrigingIndicator
+from aphid_spatial.methods.geostatistics import (
+    OrdinaryKrigingIndicator,
+    UniversalKrigingEdge,
+)
+from aphid_spatial.methods.gp import MaternGPRegressor
+from aphid_spatial.methods.ml import SpatialRandomForest
 from aphid_spatial.evaluation.metrics import evaluate_all
 
 field = simulate_field(FieldConfig(seed=42))
@@ -62,11 +78,17 @@ readings = place_sensors(
     field, SensorConfig(n_sensors=20, placement="uniform", n_observations=50)
 )
 
-method = OrdinaryKrigingIndicator()
-method.fit(readings, field)
-p_pred = method.predict_proba(field.coords)
-
-print(evaluate_all(field.presence, p_pred, field.prob))
+# Ajuster et comparer plusieurs méthodes
+for method in [
+    OrdinaryKrigingIndicator(),
+    UniversalKrigingEdge(),       # avec dérive = distance au bord
+    MaternGPRegressor(),
+    SpatialRandomForest(),
+]:
+    method.fit(readings, field)
+    p_pred = method.predict_proba(field.coords)
+    metrics = evaluate_all(field.presence, p_pred, field.prob)
+    print(f"{method.name:35s} AUC={metrics['auc_roc']:.3f} RMSE={metrics['rmse_prob']:.3f}")
 ```
 
 ### Modèle d'observation
